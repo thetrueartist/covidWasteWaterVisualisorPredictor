@@ -1,0 +1,9 @@
+{
+  "name": "sewer-signal-site",
+  "private": true,
+  "type": "module",
+  "description": "Front-end tests for the static site (no dependencies, no build step).",
+  "scripts": {
+    "test": "node --test \"tests/js/**/*.test.mjs\""
+  }
+}

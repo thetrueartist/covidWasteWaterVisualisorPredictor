@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sewer Signal</title>
+<meta name="description" content="COVID-19 wastewater levels and forecasts for Scotland, the US, Canada, Germany, the Netherlands and New Zealand, with a go-or-avoid activity planner.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="wordmark" href="#" aria-label="Sewer Signal home">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M2 15c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 5 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M2 20c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 5 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".45"/><path d="M4 9l4-5 4 4 4-3 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Sewer Signal</span>
+    </a>
+    <div class="pickers">
+      <label class="picker">
+        <span class="picker-label">Country</span>
+        <select id="country-select"></select>
+      </label>
+      <label class="picker picker-area">
+        <span class="picker-label">Area</span>
+        <select id="area-select"></select>
+      </label>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="page" aria-busy="true">
+  <p id="load-status" class="load-status">Loading wastewater data…</p>
+
+  <section id="verdict" class="verdict" hidden aria-labelledby="verdict-heading">
+    <p class="eyebrow" id="verdict-eyebrow"></p>
+    <h1 id="verdict-heading" class="verdict-heading"></h1>
+    <p id="verdict-now" class="verdict-now"></p>
+    <p id="verdict-advice" class="verdict-advice"></p>
+    <dl class="stats" id="stats"></dl>
+    <p id="stale-warning" class="notice" hidden></p>
+  </section>
+
+  <div class="desk" id="desk" hidden>
+    <div class="desk-main">
+      <section class="card" aria-labelledby="outlook-heading">
+        <div class="card-head">
+          <h2 id="outlook-heading">Next few weeks</h2>
+          <p class="card-sub">Chance of each level, from the forecast model. Darker blue means more virus.</p>
+        </div>
+        <ol class="weeks" id="weeks"></ol>
+        <ul class="level-key" id="level-key" aria-label="Level colours"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="chart-heading">
+        <div class="card-head card-head-row">
+          <div>
+            <h2 id="chart-heading">Virus in wastewater</h2>
+            <p class="card-sub" id="chart-sub"></p>
+          </div>
+          <div class="chart-controls">
+            <div class="segmented" role="group" aria-label="Time range" id="range-buttons">
+              <button type="button" data-weeks="26">6M</button>
+              <button type="button" data-weeks="52" aria-pressed="true">1Y</button>
+              <button type="button" data-weeks="104">2Y</button>
+              <button type="button" data-weeks="0">All</button>
+            </div>
+            <div class="segmented" role="group" aria-label="Scale" id="scale-buttons">
+              <button type="button" data-scale="linear" aria-pressed="true">Linear</button>
+              <button type="button" data-scale="log">Log</button>
+            </div>
+          </div>
+        </div>
+        <ul class="legend" id="chart-legend"></ul>
+        <div class="chart-wrap" id="chart"></div>
+        <details class="table-view">
+          <summary>Show the numbers</summary>
+          <div class="table-scroll"><table id="data-table"></table></div>
+        </details>
+      </section>
+    </div>
+
+    <aside class="desk-side">
+      <section class="card planner" aria-labelledby="planner-heading">
+        <div class="card-head">
+          <h2 id="planner-heading">Should I go?</h2>
+          <p class="card-sub">Pick what you're planning and when.</p>
+        </div>
+        <fieldset class="field">
+          <legend>Activity</legend>
+          <div class="activity-list" id="activity-list"></div>
+        </fieldset>
+        <fieldset class="field">
+          <legend>When</legend>
+          <div class="segmented segmented-wide" role="group" id="when-buttons"></div>
+        </fieldset>
+        <label class="switch" for="vulnerable">
+          <input type="checkbox" id="vulnerable">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>I'm at higher risk, or will be around someone who is</span>
+        </label>
+        <div class="advice" id="advice" aria-live="polite"></div>
+      </section>
+    </aside>
+  </div>
+
+  <section class="card" id="areas-card" hidden aria-labelledby="areas-heading">
+    <div class="card-head card-head-row">
+      <div>
+        <h2 id="areas-heading">All areas</h2>
+        <p class="card-sub" id="areas-sub"></p>
+      </div>
+      <div class="area-filters">
+        <label class="picker">
+          <span class="picker-label">Show</span>
+          <select id="group-filter"></select>
+        </label>
+        <label class="picker">
+          <span class="picker-label">Search</span>
+          <input type="search" id="area-search" placeholder="Name" autocomplete="off">
+        </label>
+      </div>
+    </div>
+    <div class="distribution" id="distribution"></div>
+    <div class="table-scroll">
+      <table class="areas" id="areas-table">
+        <thead>
+          <tr>
+            <th scope="col"><button type="button" data-sort="name">Area</button></th>
+            <th scope="col"><button type="button" data-sort="index" aria-sort="descending">Level now</button></th>
+            <th scope="col" class="num"><button type="button" data-sort="trend">Trend / week</button></th>
+            <th scope="col"><button type="button" data-sort="outlook">Next week</button></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card about" id="about" hidden aria-labelledby="about-heading">
+    <h2 id="about-heading">How this works</h2>
+    <div class="about-grid">
+      <div class="prose">
+        <h3>Reading the levels</h3>
+        <p>Infected people shed SARS-CoV-2 in their stool, often before they feel ill and whether or not they test. Treatment works sample incoming sewage and measure the virus's genetic material, so wastewater shows community spread without relying on testing.</p>
+        <p>Each area is compared with its own previous two years. Units differ between countries and labs, so a level here means where this week sits in that area's recent history.</p>
+        <ul class="level-table" id="level-table"></ul>
+        <h3>The forecast</h3>
+        <p>One gradient-boosted model is trained on every area in all six countries at once. It looks at how fast each area's level has been changing, and at the trend across its whole country. It predicts a range for each of the next six weeks, not a single number. Published data runs one to two weeks behind, so part of the forecast covers weeks that have already started.</p>
+        <p>Where the model did no better than "assume nothing changes" in back-testing, that country's forecast uses no-change instead. The table shows how it scored on the past year, which it never saw during training.</p>
+        <h3>What it can't tell you</h3>
+        <p>Wastewater tracks community trends, not the risk of any single outing. Small treatment works give noisy readings. The advice here follows general public-health practice. It is not medical advice. If you're unwell, stay home. If you're at high risk, follow your clinician's guidance.</p>
+      </div>
+      <div>
+        <h3>Back-test on the last year</h3>
+        <div class="table-scroll"><table class="metrics" id="metrics-table"></table></div>
+        <p class="fine" id="metrics-note"></p>
+        <h3>Data source</h3>
+        <p class="source" id="source"></p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <p id="footer-text"></p>
+</footer>
+
+<div class="tooltip" id="tooltip" role="status" hidden></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

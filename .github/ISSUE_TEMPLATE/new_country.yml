@@ -1,0 +1,29 @@
+name: Add a country or region
+description: Suggest a public wastewater data source to add.
+labels: [data-source]
+body:
+  - type: input
+    id: place
+    attributes:
+      label: Country or region
+      placeholder: e.g. Wales
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: Link to the data
+      description: A machine-readable file or API (CSV, JSON), not just a dashboard.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What's in it?
+      description: Areas covered (national, regional, treatment plants), how often it's updated, units, licence.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I'd like to write the adapter myself (see CONTRIBUTING.md)

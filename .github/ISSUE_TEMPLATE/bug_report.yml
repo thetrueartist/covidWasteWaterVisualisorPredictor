@@ -1,0 +1,39 @@
+name: Something's wrong
+description: A bug in the site, the data build, the forecasts or the installer.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - Web app
+        - Data build (python -m wastewater build)
+        - Forecast or levels look wrong
+        - install.sh
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Country and area
+      placeholder: e.g. Scotland, NHS Greater Glasgow and Clyde
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      description: Paste any error output. For the build, run it with -v.
+      render: text
+  - type: input
+    id: env
+    attributes:
+      label: System
+      placeholder: e.g. Ubuntu 24.04, Python 3.12, Firefox 140
