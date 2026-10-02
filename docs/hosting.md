@@ -37,9 +37,10 @@ and `sewer-signal-refresh.timer`), otherwise cron. Open
   Use [Tailscale](https://tailscale.com/) (private, nothing exposed) or a
   [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
   or put it behind Caddy (option 3).
-- **Hardware:** about 1 GB of disk. The daily build takes 1–3 minutes and
-  briefly needs about 500 MB of RAM. A Raspberry Pi 4 or 5 on a 64-bit OS
-  copes fine.
+- **Hardware:** about 1 GB of disk. The daily build trains three forecast
+  models (COVID-19, flu and RSV). It takes about 6 minutes on a 4-core
+  machine, longer on a Raspberry Pi, and briefly needs about 600 MB of RAM.
+  A Raspberry Pi 4 or 5 on a 64-bit OS copes fine.
 - **Manage it:** `./install.sh status`, `./install.sh update`,
   `./install.sh uninstall`.
 

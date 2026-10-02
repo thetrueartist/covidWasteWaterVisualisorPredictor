@@ -178,3 +178,47 @@ export function lowestWeek(weeks) {
   });
   return best;
 }
+
+/**
+ * Advice for several viruses at once, kept separate. `byVirus` maps a virus
+ * id to its plannable weeks (from planWeeks). Returns one result per virus,
+ * the strictest verdict among them (so tips can match it), and a week where
+ * the strictest verdict would be gentler, if there is one.
+ */
+export function adviseEach({ byVirus, weekIndex, activity, vulnerable }) {
+  const results = {};
+  for (const [virus, weeks] of Object.entries(byVirus)) {
+    results[virus] = advise({ weeks, weekIndex, activity, vulnerable });
+  }
+  const strictestAt = (i) => {
+    let worst = null;
+    for (const [virus, weeks] of Object.entries(byVirus)) {
+      const w = weeks[i];
+      if (!w || !w.available) continue;
+      const score = riskScore(w.probs, activity, vulnerable);
+      const verdict = verdictForScore(score);
+      if (!worst || verdictRank(verdict.id) > verdictRank(worst.verdict.id) || (verdict.id === worst.verdict.id && score > worst.score)) {
+        worst = { virus, verdict, score, week: w };
+      }
+    }
+    return worst;
+  };
+  const strictest = strictestAt(weekIndex);
+  let better = null;
+  if (strictest) {
+    const count = Math.max(...Object.values(byVirus).map((w) => w.length));
+    for (let i = 0; i < count; i++) {
+      if (i === weekIndex) continue;
+      const s = strictestAt(i);
+      if (s && verdictRank(s.verdict.id) < verdictRank(strictest.verdict.id) && (!better || s.score < better.score)) {
+        better = s;
+      }
+    }
+  }
+  return {
+    results,
+    strictest,
+    tips: strictest ? tipsFor(strictest.verdict.id, activity, vulnerable) : [],
+    better,
+  };
+}

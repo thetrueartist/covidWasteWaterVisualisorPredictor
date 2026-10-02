@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import LEVELS, RawSeries, Source, SourceInfo
+from .base import LEVELS, PATHOGENS, RawSeries, Signal, Source, SourceInfo
 from .canada import Canada
 from .germany import Germany
 from .netherlands import Netherlands
@@ -18,4 +18,4 @@ SOURCES: dict[str, type[Source]] = {
 
 DEFAULT_COUNTRY = "scotland"
 
-__all__ = ["LEVELS", "RawSeries", "Source", "SourceInfo", "SOURCES", "DEFAULT_COUNTRY"]
+__all__ = ["LEVELS", "PATHOGENS", "RawSeries", "Signal", "Source", "SourceInfo", "SOURCES", "DEFAULT_COUNTRY"]

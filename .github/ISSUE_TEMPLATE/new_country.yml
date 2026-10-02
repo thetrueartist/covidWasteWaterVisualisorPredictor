@@ -20,7 +20,7 @@ body:
     id: details
     attributes:
       label: What's in it?
-      description: Areas covered (national, regional, treatment plants), how often it's updated, units, licence.
+      description: Which viruses (COVID-19, flu, RSV), areas covered (national, regional, treatment plants), how often it's updated, units, licence.
   - type: checkboxes
     id: help
     attributes:

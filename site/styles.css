@@ -953,6 +953,97 @@ th.num {
   font-size: var(--step--1);
 }
 
+.virus-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.virus-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--step--1);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.virus-check input {
+  margin: 0;
+  accent-color: var(--selected);
+}
+
+.virus-check[data-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.trip-pickers {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 8px;
+}
+
+.trip-pickers select {
+  width: 100%;
+}
+
+.where-note {
+  font-size: var(--step--1);
+  color: var(--ink-2);
+}
+
+.verdicts {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.verdict-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.verdict-row .status-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.verdict-row strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: var(--step-1);
+  line-height: 1.2;
+}
+
+.verdict-detail {
+  display: block;
+  font-size: var(--step--1);
+  color: var(--ink-2);
+}
+
+.status-none {
+  background: var(--surface-2);
+}
+
+.tips-for {
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  font-weight: 700;
+}
+
+.advice ul.tips {
+  margin: 0;
+}
+
 .better-week {
   font-size: var(--step--1);
   background: var(--surface-2);
@@ -1120,14 +1211,22 @@ th.num {
     position: static;
   }
   .pickers {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     flex-basis: 100%;
   }
-  .picker:first-child select {
+  .pickers > .picker:first-child {
+    flex-basis: 100%;
+  }
+  .pickers > .picker:first-child .segmented {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .pickers > label.picker:nth-child(2) select {
     max-width: 150px;
   }
   .picker-area {
     flex: 1 1 0;
+    min-width: 0;
   }
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1147,4 +1246,9 @@ th.num {
   * {
     transition: none !important;
   }
+}
+
+.segmented button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="72" height="72" role="img" aria-label="Sewer Signal">
+  <path d="M2 15c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 5 2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+  <path d="M2 20c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 5 2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linecap="round" opacity=".45"/>
+  <path d="M4 9l4-5 4 4 4-3 4 4" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

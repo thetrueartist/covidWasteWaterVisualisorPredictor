@@ -2,18 +2,43 @@
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
 from ..http import Fetcher
 
 # Geographic granularity, coarsest first. The site groups regions by these.
 LEVELS = ("national", "region", "local", "site")
+
+# Wastewater surveillance started in 2020. Earlier dates, and dates more than a
+# week ahead, can only be typos or tampering (2062 for 2026, say). Left in,
+# one such row would shift the back-test window for every country.
+EARLIEST = pd.Timestamp("2020-01-01")
+MAX_DAYS_AHEAD = 7
+
+# Viruses, in the order the site offers them. Each is modelled separately.
+PATHOGENS = {
+    "covid": "COVID-19",
+    "flu": "Flu",
+    "rsv": "RSV",
+}
+
+
+@dataclass(frozen=True)
+class Signal:
+    """What one source publishes for one virus."""
+
+    metric: str
+    unit: str
+    notes: str = ""
+    kind: str = "wastewater"  # or "lab tests" where no wastewater data is published
 
 
 @dataclass(frozen=True)
@@ -25,9 +50,7 @@ class SourceInfo:
     publisher: str
     url: str
     license: str
-    metric: str
-    unit: str
-    notes: str = ""
+    signals: dict = field(default_factory=dict)  # pathogen -> Signal
 
 
 @dataclass
@@ -45,15 +68,33 @@ class RawSeries:
     values: pd.Series
     population: float | None = None
     parent: str | None = None
+    pathogen: str = "covid"
+    unit: str | None = None  # overrides the source's unit for this one series
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.level not in LEVELS:
             raise ValueError(f"unknown level {self.level!r}")
-        s = pd.to_numeric(self.values, errors="coerce")
-        s.index = pd.DatetimeIndex(pd.to_datetime(s.index)).normalize()
-        s = s[s.notna() & (s >= 0)]
-        self.values = s.groupby(level=0).mean().sort_index().astype(float)
+        if self.pathogen not in PATHOGENS:
+            raise ValueError(f"unknown pathogen {self.pathogen!r}")
+        s = pd.to_numeric(self.values, errors="coerce").astype(float)
+        dates = pd.DatetimeIndex(pd.to_datetime(s.index, errors="coerce"))
+        if dates.tz is not None:
+            dates = dates.tz_convert(None)
+        s.index = dates.normalize()
+        latest = pd.Timestamp.now().normalize() + pd.Timedelta(days=MAX_DAYS_AHEAD)
+        v = s.to_numpy()
+        ok = np.isfinite(v) & (v >= 0) & (s.index >= EARLIEST) & (s.index <= latest)
+        self.values = s[ok].groupby(level=0).mean().sort_index()
+        self.population = _positive_or_none(self.population)
+
+
+def _positive_or_none(value) -> float | None:
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) and x > 0 else None
 
 
 class Source(ABC):
@@ -83,8 +124,10 @@ def weighted_weekly_mean(
     Each site first contributes one weekly mean so that sites sampled several
     times a week do not get extra weight.
     """
-    df = frame[[date_col, value_col, weight_col, site_col]].dropna()
-    df = df[df[weight_col] > 0]
+    df = frame[[date_col, value_col, weight_col, site_col]].copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna()
+    df = df[np.isfinite(df[value_col]) & np.isfinite(df[weight_col]) & (df[weight_col] > 0)]
     if df.empty:
         return pd.Series(dtype=float)
     df = df.assign(week=week_ending(df[date_col]).to_numpy())
@@ -95,12 +138,17 @@ def weighted_weekly_mean(
 
 
 def unique_ids(series: Iterable[RawSeries]) -> list[RawSeries]:
-    """Make region ids unique within a source by suffixing duplicates."""
-    seen: dict[str, int] = {}
+    """Make region ids unique within a source and virus by suffixing duplicates.
+
+    The same place keeps the same id across viruses, so the site can match an
+    area between COVID, flu and RSV.
+    """
+    seen: dict[tuple[str, str], int] = {}
     out = []
     for s in series:
-        n = seen.get(s.region_id, 0)
-        seen[s.region_id] = n + 1
+        key = (s.pathogen, s.region_id)
+        n = seen.get(key, 0)
+        seen[key] = n + 1
         if n:
             s.region_id = f"{s.region_id}-{n + 1}"
         out.append(s)

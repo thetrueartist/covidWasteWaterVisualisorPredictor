@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "covid-wastewater"
 version = "0.1.0"
-description = "COVID-19 wastewater visualiser and forecaster: when is it quiet enough to go out, and when to avoid crowds."
+description = "COVID-19, flu and RSV wastewater visualiser and forecaster: when is it quiet enough to go out, and when to avoid crowds."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

@@ -37,10 +37,15 @@ class Prepared:
     y: pd.Series
     ys: pd.Series
     index: pd.Series
+    lab: bool = False  # laboratory surveillance rather than wastewater
+
+    @property
+    def pathogen(self) -> str:
+        return self.raw.pathogen
 
     @property
     def key(self) -> str:
-        return f"{self.country}/{self.raw.region_id}"
+        return f"{self.country}/{self.pathogen}/{self.raw.region_id}"
 
     @property
     def last_date(self) -> pd.Timestamp | None:
@@ -117,7 +122,7 @@ def log_offset(weekly: pd.Series) -> float:
     return float(OFFSET_FRACTION * positive.median()) if len(positive) else 1.0
 
 
-def prepare(raw: RawSeries, country: str, hemisphere: str) -> Prepared | None:
+def prepare(raw: RawSeries, country: str, hemisphere: str, lab: bool = False) -> Prepared | None:
     weekly = to_weekly(raw.values)
     if weekly.notna().sum() < 8:
         return None
@@ -133,4 +138,5 @@ def prepare(raw: RawSeries, country: str, hemisphere: str) -> Prepared | None:
         y=y,
         ys=ys,
         index=rolling_index(ys),
+        lab=lab,
     )

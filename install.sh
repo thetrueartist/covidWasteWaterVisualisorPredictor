@@ -93,7 +93,21 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || die "--port must be a number from 1024 to 65535"
+# Strict input checks: these values end up in cron lines and systemd units.
+KNOWN_COUNTRIES="scotland usa canada germany netherlands new-zealand"
+if ! [[ "$PORT" =~ ^[1-9][0-9]{3,4}$ ]] || [ "$PORT" -gt 65535 ]; then
+  die "--port must be a number from 1024 to 65535"
+fi
+if [ -n "$COUNTRIES" ]; then
+  [[ "$COUNTRIES" =~ ^[a-z-]+(,[a-z-]+)*$ ]] || die "--countries must look like scotland,usa"
+  IFS=',' read -r -a _wanted <<< "$COUNTRIES"
+  for _c in "${_wanted[@]}"; do
+    [[ " $KNOWN_COUNTRIES " == *" $_c "* ]] || die "unknown country '$_c' (choose from: $KNOWN_COUNTRIES)"
+  done
+fi
+if [ -n "$BRANCH" ] && ! [[ "$BRANCH" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]]; then
+  die "--branch must be a plain git branch name"
+fi
 
 [ "$(uname -s)" = "Linux" ] || die "this script is for Linux. On macOS/Windows follow the manual steps in the README."
 
@@ -105,6 +119,8 @@ if [ -z "$APP_DIR" ]; then
 fi
 case "$APP_DIR" in /*) ;; *) APP_DIR="$PWD/$APP_DIR" ;; esac
 APP_DIR="$(realpath -m -- "$APP_DIR" 2>/dev/null || printf '%s' "$APP_DIR")"
+# Paths go into cron and systemd lines, so keep them to plain characters.
+[[ "$APP_DIR" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || die "install folder '$APP_DIR' contains spaces or special characters; choose another with --dir"
 STATE_FILE="$APP_DIR/.sewer-signal.env"
 VENV="$APP_DIR/.venv"
 PY="$VENV/bin/python"
@@ -118,14 +134,16 @@ load_state() {
   local key value
   while IFS='=' read -r key value; do
     case "$key" in
-      SAVED_HOST) SAVED_HOST="$value" ;;
-      SAVED_PORT) [[ "$value" =~ ^[0-9]+$ ]] && SAVED_PORT="$value" ;;
-      SAVED_MODE) SAVED_MODE="$value" ;;
+      SAVED_HOST) if [[ "$value" == "127.0.0.1" || "$value" == "0.0.0.0" ]]; then SAVED_HOST="$value"; fi ;;
+      SAVED_PORT) if [[ "$value" =~ ^[1-9][0-9]{3,4}$ ]] && [ "$value" -le 65535 ]; then SAVED_PORT="$value"; fi ;;
+      SAVED_MODE) if [[ "$value" =~ ^(manual|systemd|cron)$ ]]; then SAVED_MODE="$value"; fi ;;
     esac
   done < "$STATE_FILE"
+  return 0
 }
 save_state() {
-  printf '%s\nSAVED_HOST=%s\nSAVED_PORT=%s\nSAVED_MODE=%s\n' "$MARKER" "$HOST" "$PORT" "$1" > "$STATE_FILE"
+  safe_target "$STATE_FILE"
+  (umask 077; printf '%s\nSAVED_HOST=%s\nSAVED_PORT=%s\nSAVED_MODE=%s\n' "$MARKER" "$HOST" "$PORT" "$1" > "$STATE_FILE")
 }
 SAVED_HOST=""; SAVED_PORT=""; SAVED_MODE=""
 
@@ -225,14 +243,23 @@ setup_venv() {
   fi
   [ -x "$PY" ] || python3 -m venv "$VENV"
   "$PY" -m pip install --quiet --upgrade pip || warn "couldn't upgrade pip; carrying on with the bundled one"
-  "$PY" -m pip install --quiet -e "$APP_DIR" \
-    || die "pip couldn't install the Python packages (details above). Check your internet connection or proxy, then run this again."
-  ok "numpy, pandas, scikit-learn, requests"
+  # Prefer the exact, hash-checked versions CI tests with. If that fails (an
+  # unusual Python or platform with no matching wheels), fall back to the
+  # newest compatible releases. The app itself runs from $APP_DIR.
+  if [ -f "$APP_DIR/requirements.txt" ] \
+    && "$PY" -m pip install --quiet --require-hashes -r "$APP_DIR/requirements.txt"; then
+    ok "numpy, pandas, scikit-learn, requests (pinned versions)"
+  else
+    warn "the pinned versions didn't install; trying the latest compatible ones"
+    "$PY" -m pip install --quiet -e "$APP_DIR" \
+      || die "pip couldn't install the Python packages (details above). Check your internet connection or proxy, then run this again."
+    ok "numpy, pandas, scikit-learn, requests"
+  fi
 }
 
 build_data() {
   [ "$SKIP_BUILD" = 1 ] && { info "skipping the data build (--no-build)"; return; }
-  step "Downloading wastewater data and training the forecast (1-3 minutes)"
+  step "Downloading wastewater data and training the forecasts (5-10 minutes)"
   local args=(-m wastewater build)
   [ -n "$COUNTRIES" ] && args+=(--countries "$COUNTRIES")
   if (cd "$APP_DIR" && "$PY" "${args[@]}"); then
@@ -282,7 +309,15 @@ has_systemd_user() {
   [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1
 }
 
-ours() { [ ! -e "$1" ] || grep -qF "$MARKER" "$1"; }
+# A file is ours if it doesn't exist yet, or is a regular file whose first line is our marker.
+ours() {
+  [ -L "$1" ] && return 1
+  [ ! -e "$1" ] && return 0
+  [ -f "$1" ] && [ "$(head -n 1 -- "$1")" = "$MARKER" ]
+}
+
+# Never write through a symlink someone else planted.
+safe_target() { [ ! -L "$1" ] || die "$1 is a symlink; refusing to write through it"; }
 
 write_unit() { # write_unit name content
   local path="$UNIT_DIR/$1"
@@ -293,7 +328,7 @@ write_unit() { # write_unit name content
 install_systemd() {
   mkdir -p "$UNIT_DIR"
   write_unit "$APP.service" "[Unit]
-Description=Sewer Signal (COVID wastewater dashboard) on http://$HOST:$PORT
+Description=Sewer Signal (COVID-19, flu and RSV wastewater dashboard) on http://$HOST:$PORT
 After=network-online.target
 
 [Service]
@@ -301,6 +336,7 @@ WorkingDirectory=$APP_DIR
 ExecStart=$PY -m wastewater serve --host $HOST --port $PORT
 Restart=on-failure
 NoNewPrivileges=true
+UMask=0077
 
 [Install]
 WantedBy=default.target"
@@ -314,6 +350,7 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=$APP_DIR
 ExecStart=$PY $build_args
+TimeoutStartSec=1h
 Nice=10
 NoNewPrivileges=true"
   write_unit "$APP-refresh.timer" "[Unit]
@@ -354,32 +391,48 @@ wait_until_up() { # wait_until_up port: poll for up to 15s
 }
 
 server_pid() { # pid of our background server, if it's really ours
-  [ -f "$PID_FILE" ] || return 1
+  [ -f "$PID_FILE" ] && [ ! -L "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE")"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF "$PY -m wastewater serve" || return 1
   echo "$pid"
 }
 
-cron_replace() { # cron_replace "new lines" (removes our old lines first)
+CRON_TAG=" # $APP-cron"
+
+cron_replace() { # cron_replace "new lines": drops only lines ending in our tag, keeps everything else as is
   local current
-  current="$(crontab -l 2>/dev/null | grep -vF "$APP-cron" || true)"
-  printf '%s\n%s\n' "$current" "$1" | sed '/^$/d' | crontab -
+  current="$(crontab -l 2>/dev/null | awk -v tag="$CRON_TAG" '
+    length($0) >= length(tag) && substr($0, length($0) - length(tag) + 1) == tag { next }
+    { print }' || true)"
+  {
+    if [ -n "$current" ]; then printf '%s\n' "$current"; fi
+    if [ -n "$1" ]; then printf '%s\n' "$1"; fi
+  } | crontab -
+}
+
+has_our_cron() {
+  crontab -l 2>/dev/null | awk -v tag="$CRON_TAG" '
+    length($0) >= length(tag) && substr($0, length($0) - length(tag) + 1) == tag { found = 1 }
+    END { exit !found }'
 }
 
 start_background() {
   local pid
   if pid="$(server_pid)"; then stop_pid "$pid"; fi
-  (cd "$APP_DIR" || exit 1; nohup "$PY" -m wastewater serve --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
+  safe_target "$PID_FILE"
+  safe_target "$LOG_FILE"
+  (cd "$APP_DIR" || exit 1; umask 077; nohup "$PY" -m wastewater serve --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
   if ! wait_until_up "$PORT" || ! server_pid >/dev/null; then die "the server didn't start; see $LOG_FILE"; fi
 }
 
 install_cron() {
-  command -v crontab >/dev/null 2>&1 || die "neither systemd user services nor cron are available. Start it yourself with: cd $APP_DIR && $PY -m wastewater serve --port $PORT"
+  command -v crontab >/dev/null 2>&1 || die "neither systemd user services nor cron are available. Start it yourself with: $(start_hint)"
   local build_args="-m wastewater build"
   [ -n "$COUNTRIES" ] && build_args+=" --countries $COUNTRIES"
-  cron_replace "15 7 * * * cd '$APP_DIR' && '$PY' $build_args >> '$APP_DIR/.refresh.log' 2>&1 # $APP-cron
-@reboot cd '$APP_DIR' || exit 1; '$PY' -m wastewater serve --host $HOST --port $PORT >> '$LOG_FILE' 2>&1 & echo \$! > '$PID_FILE' # $APP-cron"
+  # Paths and arguments were validated to plain characters above, so these lines can't be bent.
+  cron_replace "15 7 * * * cd $APP_DIR && timeout 3600 $PY $build_args >> $APP_DIR/.refresh.log 2>&1$CRON_TAG
+@reboot cd $APP_DIR || exit 1; umask 077; $PY -m wastewater serve --host $HOST --port $PORT >> $LOG_FILE 2>&1 & echo \$! > $PID_FILE$CRON_TAG"
   start_background
   ok "running in the background (pid $(server_pid)); cron refreshes data daily and restarts it after a reboot"
 }
@@ -391,6 +444,8 @@ stop_existing() {
   local pid
   if pid="$(server_pid)"; then stop_pid "$pid"; fi
 }
+
+start_hint() { printf 'cd %q && %q -m wastewater serve --host %q --port %q' "$APP_DIR" "$PY" "$HOST" "$PORT"; }
 
 # ---------- commands ----------
 show_url() {
@@ -431,7 +486,7 @@ cmd_install() {
   show_url
   info "Later: run ${B}$0 --service${RST} to keep it running and refresh data daily."
   if [ "$NO_START" = 1 ]; then
-    info "Start it with: cd $APP_DIR && $PY -m wastewater serve --host $HOST --port $PORT"
+    info "Start it with: $(start_hint)"
     return
   fi
   info "Starting now. Press Ctrl+C to stop."
@@ -455,7 +510,7 @@ cmd_update() {
   case "$SAVED_MODE" in
     systemd) systemctl --user restart "$APP.service" && ok "service restarted" ;;
     cron) start_background && ok "server restarted" ;;
-    *) info "Start it with: cd $APP_DIR && $PY -m wastewater serve --port $PORT" ;;
+    *) info "Start it with: $(start_hint)" ;;
   esac
 }
 
@@ -487,23 +542,29 @@ cmd_status() {
 cmd_uninstall() {
   load_state
   step "Removing the background service"
-  if has_systemd_user; then
-    for unit in "$APP.service" "$APP-refresh.timer" "$APP-refresh.service"; do
-      if [ -f "$UNIT_DIR/$unit" ] && ours "$UNIT_DIR/$unit"; then
-        systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
-        rm -f -- "$UNIT_DIR/$unit"
-        ok "removed $unit"
-      fi
-    done
-    systemctl --user daemon-reload 2>/dev/null || true
-  fi
-  if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -qF "$APP-cron"; then
-    cron_replace "" && ok "removed cron entries"
+  local systemd=0 leftover=0
+  has_systemd_user && systemd=1
+  for unit in "$APP.service" "$APP-refresh.timer" "$APP-refresh.service"; do
+    [ -e "$UNIT_DIR/$unit" ] || [ -L "$UNIT_DIR/$unit" ] || continue
+    if ours "$UNIT_DIR/$unit"; then
+      [ "$systemd" = 1 ] && systemctl --user disable --now "$unit" >/dev/null 2>&1
+      rm -f -- "$UNIT_DIR/$unit"
+      ok "removed $unit"
+    else
+      warn "$UNIT_DIR/$unit wasn't created by this script; left it alone"
+      leftover=1
+    fi
+  done
+  [ "$systemd" = 1 ] && systemctl --user daemon-reload 2>/dev/null
+  if command -v crontab >/dev/null 2>&1 && has_our_cron; then
+    cron_replace ""
+    if has_our_cron; then warn "couldn't remove the cron entries; check with: crontab -l"; leftover=1; else ok "removed cron entries"; fi
   fi
   local pid; if pid="$(server_pid)"; then stop_pid "$pid"; ok "stopped server (pid $pid)"; fi
-  rm -f -- "$PID_FILE"
-  [ -f "$STATE_FILE" ] && grep -qF "$MARKER" "$STATE_FILE" && rm -f -- "$STATE_FILE"
-  info "The folder $APP_DIR is still there. Delete it with: rm -rf '$APP_DIR'"
+  [ -L "$PID_FILE" ] || rm -f -- "$PID_FILE"
+  if ours "$STATE_FILE" && [ -e "$STATE_FILE" ]; then rm -f -- "$STATE_FILE"; fi
+  [ "$leftover" = 0 ] || warn "some pieces were left in place (see above)"
+  info "The folder is still there. To delete it: rm -rf $(printf '%q' "$APP_DIR")"
 }
 
 case "$CMD" in

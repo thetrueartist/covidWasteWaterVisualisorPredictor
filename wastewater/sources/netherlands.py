@@ -13,7 +13,7 @@ import io
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Source, SourceInfo, slugify, unique_ids
+from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids
 
 BASE = "https://data.rivm.nl/covid-19/"
 NATIONAL_URL = BASE + "COVID-19_rioolwaterdata_landelijk.csv"
@@ -58,9 +58,13 @@ class Netherlands(Source):
         publisher="RIVM — National Institute for Public Health and the Environment",
         url="https://data.rivm.nl/meta/srv/eng/catalog.search#/metadata/a2960b68-9d3f-4dc3-9485-600570cd52b9",
         license="CC0 1.0",
-        metric="SARS-CoV-2 RNA flow per 100,000 inhabitants per day",
-        unit="particles/100k/day",
-        notes="National series is RIVM's daily national average; treatment-plant series are as measured.",
+        signals={
+            "covid": Signal(
+                'SARS-CoV-2 RNA flow per 100,000 inhabitants per day',
+                'particles/100k/day',
+                "National series is RIVM's daily national average; treatment-plant series are as measured.",
+            ),
+        },
     )
 
     def fetch(self, fetcher: Fetcher) -> list[RawSeries]:

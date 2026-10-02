@@ -1,4 +1,4 @@
-.venv/
+.venv
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -9,3 +9,8 @@ site/data/*.json
 build/
 dist/
 node_modules/
+# install.sh runtime files (the server log records client IPs and paths)
+.sewer-signal.env
+.server.pid
+.server.log
+.refresh.log

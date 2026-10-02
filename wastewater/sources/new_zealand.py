@@ -12,7 +12,7 @@ import re
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Source, SourceInfo, slugify, unique_ids
+from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids
 
 BASE = "https://raw.githubusercontent.com/ESR-NZ/covid_in_wastewater/main/data/"
 
@@ -50,7 +50,7 @@ def parse_national(text: str) -> RawSeries:
     df = pd.read_csv(io.StringIO(text))
     return RawSeries(
         "new-zealand", "New Zealand", "national", "New Zealand",
-        pd.Series(df[_value_col(df)].to_numpy(), index=pd.to_datetime(df["week_end_date"])),
+        pd.Series(df[_value_col(df)].to_numpy(), index=pd.to_datetime(df["week_end_date"], errors="coerce")),
     )
 
 
@@ -60,7 +60,7 @@ def parse_regions(text: str) -> list[RawSeries]:
     return [
         RawSeries(
             slugify(region), str(region), "region", "Regions",
-            pd.Series(g[col].to_numpy(), index=pd.to_datetime(g["week_end_date"])),
+            pd.Series(g[col].to_numpy(), index=pd.to_datetime(g["week_end_date"], errors="coerce")),
         )
         for region, g in df.groupby("Region", sort=True)
     ]
@@ -83,7 +83,7 @@ def parse_sites(text: str, sites_text: str | None = None) -> list[RawSeries]:
                 m.get("DisplayName") or _site_name(str(code)),
                 "site",
                 "Treatment plants",
-                pd.Series(g[col].to_numpy(), index=pd.to_datetime(g["week_end_date"])),
+                pd.Series(g[col].to_numpy(), index=pd.to_datetime(g["week_end_date"], errors="coerce")),
                 population=m.get("Population"),
                 parent=region,
             )
@@ -100,9 +100,13 @@ class NewZealand(Source):
         publisher="PHF Science (formerly ESR) — Wastewater surveillance programme",
         url="https://github.com/ESR-NZ/covid_in_wastewater",
         license="CC BY 4.0",
-        metric="SARS-CoV-2 genome copies per person per day",
-        unit="copies/person/day",
-        notes="Regional and national values are PHF Science's population-weighted aggregates.",
+        signals={
+            "covid": Signal(
+                'SARS-CoV-2 genome copies per person per day',
+                'copies/person/day',
+                "Regional and national values are PHF Science's population-weighted aggregates.",
+            ),
+        },
     )
 
     def fetch(self, fetcher: Fetcher) -> list[RawSeries]:

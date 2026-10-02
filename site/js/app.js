@@ -2,7 +2,7 @@ import {
   ACTIVITIES,
   LEVEL_IDS,
   activityById,
-  advise,
+  adviseEach,
   expectedLevel,
   lowestWeek,
   mostLikely,
@@ -37,14 +37,21 @@ const store = {
 const state = {
   index: null,
   labels: {},
+  virusLabels: {},
   countryId: null,
-  countries: new Map(),
+  virus: store.get("virus", "covid"),
+  files: new Map(), // "country-virus" -> pending fetch
+  data: new Map(), // "country-virus" -> loaded data
   region: null,
+  fellBack: null, // area asked for that this virus doesn't cover
   weeks: store.get("weeks", 52),
   scale: store.get("scale", "linear"),
   activity: store.get("activity", "restaurant"),
   when: 0,
-  vulnerable: store.get("vulnerable", false),
+  vulnerable: false, // deliberately not saved: health-related, and a github.io origin is shared
+  planViruses: store.get("planViruses", ["covid", "flu", "rsv"]),
+  where: "here",
+  trip: store.get("trip", null), // {country, region}
   sort: { key: "index", dir: -1 },
   group: "",
   search: "",
@@ -75,6 +82,27 @@ const GENERAL_ADVICE = {
   very_high: "Very high. Postpone crowded indoor plans if you can and mask in shared indoor air.",
 };
 
+/** Own property only, so data values like "constructor" can't reach Object.prototype. */
+function own(obj, key) {
+  return obj && typeof key === "string" && Object.hasOwn(obj, key) ? obj[key] : undefined;
+}
+
+/** Only https links from the data become clickable. */
+function safeUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Virus name as it reads mid-sentence: "flu", but "COVID-19" and "RSV". */
+function inText(virus) {
+  const label = own(state.virusLabels, virus) ?? String(virus);
+  return label === "Flu" ? "flu" : label;
+}
+
 // ---------- small DOM helpers ----------
 function h(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -82,6 +110,7 @@ function h(tag, attrs = {}, ...children) {
     if (v == null || v === false) continue;
     if (k === "class") node.className = v;
     else if (k === "dataset") Object.assign(node.dataset, v);
+    else if (k === "style") Object.assign(node.style, v); // CSSOM, allowed by the CSP
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v === true ? "" : v);
   }
@@ -128,7 +157,8 @@ const ICONS = {
 };
 
 function chip(levelId, text) {
-  return h("span", { class: "chip", dataset: { level: levelId ?? "none" } }, text ?? (levelId ? state.labels[levelId] : "No data"));
+  const known = own(state.labels, levelId);
+  return h("span", { class: "chip", dataset: { level: known ? levelId : "none" } }, text ?? known ?? "No data");
 }
 
 function trendIcon(label) {
@@ -138,10 +168,6 @@ function trendIcon(label) {
   return svgIcon(ICONS.flat, 14);
 }
 
-function levelOfIndex(idx) {
-  return idx == null ? null : LEVEL_IDS[Math.min(4, Math.floor(idx / 20))];
-}
-
 // ---------- data ----------
 async function getJSON(path) {
   const res = await fetch(DATA_DIR + path, { cache: "no-cache" });
@@ -149,60 +175,149 @@ async function getJSON(path) {
   return res.json();
 }
 
-async function loadCountry(id) {
-  if (!state.countries.has(id)) {
-    const meta = state.index.countries.find((c) => c.id === id);
-    state.countries.set(id, { meta, data: await getJSON(meta.file) });
-  }
-  return state.countries.get(id);
+function countryMeta(id) {
+  return state.index.countries.find((c) => c.id === id);
 }
 
-function currentCountry() {
-  return state.countries.get(state.countryId);
+function virusMeta(countryId, virus) {
+  return countryMeta(countryId)?.viruses?.[virus] ?? null;
+}
+
+function virusesOf(countryId) {
+  const meta = countryMeta(countryId);
+  return state.index.viruses.map((v) => v.id).filter((v) => meta?.viruses?.[v]);
+}
+
+async function loadData(countryId, virus) {
+  const key = `${countryId}-${virus}`;
+  if (state.data.has(key)) return state.data.get(key);
+  if (!state.files.has(key)) {
+    const meta = virusMeta(countryId, virus);
+    if (!meta) return null;
+    state.files.set(key, getJSON(meta.file));
+  }
+  try {
+    const data = await state.files.get(key);
+    state.data.set(key, data);
+    return data;
+  } finally {
+    state.files.delete(key);
+  }
+}
+
+function currentMeta() {
+  return virusMeta(state.countryId, state.virus);
+}
+
+function currentData() {
+  return state.data.get(`${state.countryId}-${state.virus}`);
+}
+
+/** The area with this id, or the virus's national series when it doesn't cover that area. */
+function findRegion(data, meta, id) {
+  return (
+    data.regions.find((r) => r.id === id) ??
+    data.regions.find((r) => r.id === meta.default_region) ??
+    data.regions[0]
+  );
+}
+
+function unitOf(region, meta) {
+  return region?.unit ?? meta?.signal?.unit ?? "";
 }
 
 function readHash() {
-  const raw = decodeURIComponent(location.hash.slice(1));
-  const [country, region] = raw.split("~");
-  return { country, region };
+  let raw = "";
+  try {
+    raw = decodeURIComponent(location.hash.slice(1));
+  } catch {
+    raw = "";
+  }
+  const [country, region, virus] = raw.split("~");
+  return { country, region, virus };
 }
 
 function writeHash() {
-  const hash = `#${state.countryId}~${state.region.id}`;
+  const parts = [state.countryId, state.region.id];
+  if (state.virus !== "covid") parts.push(state.virus);
+  const hash = `#${parts.join("~")}`;
   if (location.hash !== hash) history.replaceState(null, "", hash);
 }
 
 // ---------- selection ----------
-async function selectCountry(id, regionId) {
-  const meta = state.index.countries.find((c) => c.id === id) ?? state.index.countries.find((c) => c.id === state.index.default_country);
-  document.getElementById("main").setAttribute("aria-busy", "true");
-  const { data } = await loadCountry(meta.id);
+async function show(countryId, regionId, virus) {
+  const meta = countryMeta(countryId) ?? countryMeta(state.index.default_country);
+  const available = virusesOf(meta.id);
+  const wanted = virus ?? state.virus;
+  const chosen = available.includes(wanted) ? wanted : available[0];
+  $("main").setAttribute("aria-busy", "true");
+  const data = await loadData(meta.id, chosen);
+
+  const countryChanged = meta.id !== state.countryId;
   state.countryId = meta.id;
-  state.group = "";
-  state.search = "";
-  state.showAll = false;
-  $("area-search").value = "";
+  state.virus = chosen;
   store.set("country", meta.id);
-  const region = data.regions.find((r) => r.id === regionId) ?? data.regions.find((r) => r.id === meta.default_region) ?? data.regions[0];
+  store.set("virus", chosen);
+  if (countryChanged) {
+    state.group = "";
+    state.search = "";
+    state.showAll = false;
+    $("area-search").value = "";
+  }
+  const vMeta = currentMeta();
+  const wantedRegion = regionId ?? (countryChanged ? null : state.region?.id) ?? store.get(`region:${meta.id}`, null);
+  state.region = findRegion(data, vMeta, wantedRegion);
+  state.fellBack = wantedRegion && state.region.id !== wantedRegion ? { id: wantedRegion, wantedVirus: wanted } : null;
+  if (!state.fellBack) store.set(`region:${meta.id}`, state.region.id);
+  if (wanted !== chosen) state.fellBack = { ...(state.fellBack ?? {}), virusMissing: wanted };
+
+  renderVirusButtons();
   renderCountryPicker();
   renderAreaPicker();
-  selectRegion(region.id);
-  renderAreas();
-  renderAbout();
-  document.getElementById("main").setAttribute("aria-busy", "false");
-}
-
-function selectRegion(id) {
-  const { data } = currentCountry();
-  state.region = data.regions.find((r) => r.id === id) ?? data.regions[0];
-  store.set(`region:${state.countryId}`, state.region.id);
   $("area-select").value = state.region.id;
   writeHash();
   renderRegion();
-  markCurrentRow();
+  renderAreas();
+  renderAbout();
+  $("main").setAttribute("aria-busy", "false");
+}
+
+function selectRegion(id) {
+  return safeShow(state.countryId, id, state.virus);
+}
+
+/** show(), with load failures reported on the page instead of thrown. */
+function safeShow(...args) {
+  return show(...args).catch((err) => {
+    $("main").setAttribute("aria-busy", "false");
+    const note = $("virus-note");
+    note.hidden = false;
+    note.textContent = `Couldn't load that data (${err.message}). Check your connection and try again.`;
+  });
 }
 
 // ---------- pickers ----------
+function renderVirusButtons() {
+  const available = virusesOf(state.countryId);
+  const meta = countryMeta(state.countryId);
+  setChildren(
+    $("virus-buttons"),
+    ...state.index.viruses.map((v) =>
+      h(
+        "button",
+        {
+          type: "button",
+          "aria-pressed": String(v.id === state.virus),
+          disabled: !available.includes(v.id),
+          title: available.includes(v.id) ? null : `${meta.name} doesn't publish ${inText(v.id)} data`,
+          onclick: () => safeShow(state.countryId, state.fellBack?.id ?? state.region.id, v.id),
+        },
+        v.label,
+      ),
+    ),
+  );
+}
+
 function renderCountryPicker() {
   const sel = $("country-select");
   setChildren(sel, ...state.index.countries.map((c) => h("option", { value: c.id }, `${c.flag} ${c.name}`)));
@@ -213,18 +328,22 @@ function regionOptionText(r) {
   return r.parent && r.level !== "region" ? `${r.name} (${r.parent})` : r.name;
 }
 
-function renderAreaPicker() {
-  const sel = $("area-select");
+function fillAreaSelect(sel, regions) {
   const groups = new Map();
-  for (const r of currentCountry().data.regions) {
+  for (const r of regions) {
     if (!groups.has(r.group)) groups.set(r.group, []);
     groups.get(r.group).push(r);
   }
-  setChildren(sel, 
-    ...[...groups].map(([group, regions]) =>
-      h("optgroup", { label: group }, regions.map((r) => h("option", { value: r.id }, regionOptionText(r)))),
+  setChildren(
+    sel,
+    ...[...groups].map(([group, rs]) =>
+      h("optgroup", { label: group }, rs.map((r) => h("option", { value: r.id }, regionOptionText(r)))),
     ),
   );
+}
+
+function renderAreaPicker() {
+  fillAreaSelect($("area-select"), currentData().regions);
 }
 
 // ---------- region views ----------
@@ -235,24 +354,37 @@ function renderRegion() {
   renderVerdict(r, weeks);
   renderWeeks(r);
   renderChart();
-  renderPlanner(weeks);
+  renderPlanner();
   $("verdict").hidden = false;
   $("desk").hidden = false;
   $("areas-card").hidden = false;
   $("about").hidden = false;
   $("load-status").hidden = true;
-  document.title = `${r.name} · Sewer Signal`;
+  document.title = `${r.name} · ${own(state.virusLabels, state.virus)} · Sewer Signal`;
 }
 
 function renderVerdict(r, weeks) {
-  const { meta } = currentCountry();
+  const meta = currentMeta();
   const latest = r.latest;
   const where = r.level === "national" ? "Whole country" : [r.group, r.level !== "region" ? r.parent : null].filter(Boolean).join(" · ");
-  $("verdict-eyebrow").textContent = `${r.name} · ${where} · latest sample ${formatDate(latest.source_date, true)}`;
+  $("verdict-eyebrow").textContent = `${own(state.virusLabels, state.virus)} · ${r.name} · ${where} · latest ${meta.signal.kind === "lab tests" ? "lab data" : "sample"} ${formatDate(latest.source_date, true)}`;
+
+  const notes = [];
+  if (state.fellBack?.virusMissing) {
+    notes.push(`${countryMeta(state.countryId).name} doesn't publish ${inText(state.fellBack.virusMissing)} data, so this shows ${inText(state.virus)}.`);
+  } else if (state.fellBack?.id) {
+    notes.push(`There's no ${inText(state.virus)} data for that area, so this shows ${r.name}.`);
+  }
+  if (meta.signal.kind === "lab tests") {
+    notes.push(`Based on laboratory tests, not wastewater: ${countryMeta(state.countryId).name} doesn't publish ${inText(state.virus)} wastewater data.`);
+  }
+  const note = $("virus-note");
+  note.hidden = notes.length === 0;
+  note.textContent = notes.join(" ");
 
   const heading = $("verdict-heading");
-  setChildren(heading, chip(latest.category), h("span", {}, TREND_TEXT[latest.trend?.label] ?? ""));
-  heading.setAttribute("aria-label", `${state.labels[latest.category]} ${TREND_TEXT[latest.trend?.label] ?? ""}`.trim());
+  setChildren(heading, chip(latest.category), h("span", {}, own(TREND_TEXT, latest.trend?.label) ?? ""));
+  heading.setAttribute("aria-label", `${own(state.virusLabels, state.virus)}: ${own(state.labels, latest.category)} ${own(TREND_TEXT, latest.trend?.label) ?? ""}`.trim());
 
   const now = weeks[0];
   const nowLine = $("verdict-now");
@@ -260,32 +392,34 @@ function renderVerdict(r, weeks) {
   if (now.available && now.source === "forecast") {
     const ml = mostLikely(now.probs);
     nowLevel = LEVEL_IDS[Math.min(4, Math.round(expectedLevel(now.probs) - 0.5))];
-    setChildren(nowLine, 
+    setChildren(
+      nowLine,
       `Estimate for this week (to ${formatDate(now.date)}): most likely `,
-      h("strong", {}, state.labels[ml.id].toLowerCase()),
+      h("strong", {}, own(state.labels, ml.id).toLowerCase()),
       `, ${formatPct(ml.p)} chance. Reports run ${lagText(latest.date, now.date)} behind.`,
     );
   } else if (now.available) {
-    nowLine.textContent = `This week's reading is in: ${state.labels[latest.category].toLowerCase()}.`;
+    nowLine.textContent = `This week's reading is in: ${own(state.labels, latest.category).toLowerCase()}.`;
   } else {
     nowLine.textContent = "There's no estimate for this week yet.";
   }
-  $("verdict-advice").textContent = GENERAL_ADVICE[nowLevel] ?? "";
+  $("verdict-advice").textContent = own(GENERAL_ADVICE, nowLevel) ?? "";
 
-  const unit = meta.source.unit;
+  const unit = unitOf(r, meta);
   const pctOfPeak = r.window.max > 0 ? latest.value / r.window.max : null;
   const stats = [
     ["Level", `${latest.index}/100`, `Higher than ${latest.index}% of weeks in the past two years`],
     [
       "Trend",
       h("span", { class: "trend" }, trendIcon(latest.trend?.label), latest.trend ? `${formatSignedPct(latest.trend.pct_per_week)}/wk` : "–"),
-      latest.trend ? `${TREND_WORD[latest.trend.label]} over the last two weeks` : "Not enough recent data",
+      latest.trend ? `${own(TREND_WORD, latest.trend.label)} over the last two weeks` : "Not enough recent data",
     ],
     ["Latest level", h("span", {}, formatValue(latest.value), " ", h("span", { class: "unit" }, unit)), `Smoothed, week ending ${formatDate(latest.date)}`],
     ["Versus 2-year peak", pctOfPeak == null ? "–" : formatPct(pctOfPeak), `Peak ${formatValue(r.window.max)} ${unit}`],
   ];
-  setChildren($("stats"), 
-    ...stats.map(([label, value, note]) => h("div", { class: "stat" }, h("dt", {}, label), h("dd", {}, value, h("span", { class: "stat-note" }, note)))),
+  setChildren(
+    $("stats"),
+    ...stats.map(([label, value, noteText]) => h("div", { class: "stat" }, h("dt", {}, label), h("dd", {}, value, h("span", { class: "stat-note" }, noteText)))),
   );
 
   const age = daysBetween(parseISO(latest.date), state.today);
@@ -312,8 +446,8 @@ function weekName(dateISO) {
 function probBar(probs) {
   return h(
     "div",
-    { class: "prob-bar", role: "img", "aria-label": LEVEL_IDS.map((id, i) => `${state.labels[id]} ${formatPct(probs[i])}`).join(", ") },
-    LEVEL_IDS.map((id, i) => (probs[i] >= 0.005 ? h("span", { class: `lvl-fill-${id}`, style: `flex:${probs[i]}`, title: `${state.labels[id]}: ${formatPct(probs[i])}` }) : null)),
+    { class: "prob-bar", role: "img", "aria-label": LEVEL_IDS.map((id, i) => `${own(state.labels, id)} ${formatPct(probs[i])}`).join(", ") },
+    LEVEL_IDS.map((id, i) => (probs[i] >= 0.005 ? h("span", { class: `lvl-fill-${id}`, style: { flex: String(Number(probs[i]) || 0) }, title: `${own(state.labels, id)}: ${formatPct(probs[i])}` }) : null)),
   );
 }
 
@@ -328,7 +462,8 @@ function renderWeeks(r) {
   const futureIdx = upcoming.map((f, i) => (f.date >= thisWeek ? i : -1)).filter((i) => i >= 0);
   const best = lowestWeek(futureIdx.map((i) => upcoming[i]));
   const bestIdx = best >= 0 ? futureIdx[best] : -1;
-  setChildren(list, 
+  setChildren(
+    list,
     ...upcoming.map((f, i) => {
       const ml = mostLikely(f.probs);
       const lowOrBelow = f.probs[0] + f.probs[1];
@@ -345,17 +480,21 @@ function renderWeeks(r) {
       );
     }),
   );
-  setChildren($("level-key"), 
-    ...LEVEL_IDS.map((id, k) => h("li", {}, h("span", { class: "swatch", style: `background:var(--lvl-${k + 1})` }), state.labels[id])),
+  setChildren(
+    $("level-key"),
+    ...LEVEL_IDS.map((id, k) => h("li", {}, h("span", { class: "swatch", style: { background: `var(--lvl-${k + 1})` } }), own(state.labels, id))),
   );
 }
 
 let chartFrame = 0;
 function renderChart() {
   const r = state.region;
-  const { meta } = currentCountry();
-  $("chart-sub").textContent = `${meta.source.metric} (${meta.source.unit})`;
-  setChildren($("chart-legend"), 
+  const meta = currentMeta();
+  const unit = unitOf(r, meta);
+  $("chart-heading").textContent = `${own(state.virusLabels, state.virus)} ${meta.signal.kind === "lab tests" ? "in lab tests" : "in wastewater"}`;
+  $("chart-sub").textContent = `${meta.signal.metric} (${unit})`;
+  setChildren(
+    $("chart-legend"),
     h("li", {}, lineKey(false), "Trend (smoothed)"),
     h("li", {}, dotKey(), "Weekly measurement"),
     r.forecast.length ? h("li", {}, lineKey(true), "Forecast") : null,
@@ -366,12 +505,12 @@ function renderChart() {
   drawChart($("chart"), r, {
     weeks: state.weeks,
     scale: state.scale,
-    unit: meta.source.unit,
+    unit,
     today: state.today,
     labels: state.labels,
     tooltip: $("tooltip"),
   });
-  fillTable($("data-table"), r, { unit: meta.source.unit, labels: state.labels });
+  fillTable($("data-table"), r, { unit, labels: state.labels });
 }
 
 function lineKey(dashed) {
@@ -407,7 +546,8 @@ function bandKey() {
 
 // ---------- planner ----------
 function renderActivities() {
-  setChildren($("activity-list"), 
+  setChildren(
+    $("activity-list"),
     ...ACTIVITIES.map((a) =>
       h(
         "div",
@@ -421,7 +561,7 @@ function renderActivities() {
           onchange: () => {
             state.activity = a.id;
             store.set("activity", a.id);
-            renderPlanner(planWeeks(state.region, state.today, 4));
+            renderPlanner();
           },
         }),
         h("label", { for: `act-${a.id}` }, a.label, h("small", {}, a.detail)),
@@ -431,9 +571,93 @@ function renderActivities() {
   $("vulnerable").checked = state.vulnerable;
 }
 
-function renderPlanner(weeks) {
-  setChildren($("when-buttons"), 
-    ...weeks.map((w, i) =>
+/** The place the planner is answering for: here, or a trip destination. */
+function plannerPlace() {
+  if (state.where === "trip" && state.trip && countryMeta(state.trip.country)) {
+    return { country: state.trip.country, region: state.trip.region };
+  }
+  return { country: state.countryId, region: state.fellBack?.id ?? state.region.id };
+}
+
+async function renderTripPickers() {
+  const box = $("trip-pickers");
+  box.hidden = state.where !== "trip";
+  for (const b of $("where-buttons").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.where === state.where));
+  if (state.where !== "trip") return;
+  if (!state.trip || !countryMeta(state.trip.country)) state.trip = { country: state.countryId, region: state.region.id };
+  const cSel = $("trip-country");
+  setChildren(cSel, ...state.index.countries.map((c) => h("option", { value: c.id }, `${c.flag} ${c.name}`)));
+  cSel.value = state.trip.country;
+  const virus = virusesOf(state.trip.country)[0];
+  const data = await loadData(state.trip.country, virus);
+  fillAreaSelect($("trip-area"), data.regions);
+  if (!data.regions.some((r) => r.id === state.trip.region)) state.trip.region = virusMeta(state.trip.country, virus).default_region;
+  $("trip-area").value = state.trip.region;
+  store.set("trip", state.trip);
+}
+
+let plannerToken = 0;
+async function renderPlanner() {
+  const token = ++plannerToken;
+  const place = plannerPlace();
+  const available = virusesOf(place.country);
+
+  setChildren(
+    $("virus-checks"),
+    ...state.index.viruses.map((v) =>
+      h(
+        "label",
+        { class: "virus-check", "data-disabled": String(!available.includes(v.id)) },
+        h("input", {
+          type: "checkbox",
+          id: `check-${v.id}`,
+          value: v.id,
+          checked: available.includes(v.id) && state.planViruses.includes(v.id),
+          disabled: !available.includes(v.id),
+          onchange: (e) => {
+            const set = new Set(state.planViruses);
+            if (e.target.checked) set.add(v.id);
+            else set.delete(v.id);
+            state.planViruses = state.index.viruses.map((x) => x.id).filter((x) => set.has(x));
+            store.set("planViruses", state.planViruses);
+            renderPlanner();
+          },
+        }),
+        h("span", {}, v.label),
+      ),
+    ),
+  );
+
+  const viruses = available.filter((v) => state.planViruses.includes(v));
+  const byVirus = {};
+  const used = {};
+  try {
+    for (const v of viruses) {
+      const data = await loadData(place.country, v);
+      const meta = virusMeta(place.country, v);
+      const region = findRegion(data, meta, place.region);
+      byVirus[v] = planWeeks(region, state.today, 4);
+      used[v] = { region, meta, exact: region.id === place.region };
+    }
+  } catch (err) {
+    if (token === plannerToken) setChildren($("advice"), h("p", { class: "advice-why" }, `Couldn't load the data for that place (${err.message}).`));
+    return;
+  }
+  if (token !== plannerToken) return; // a newer render started meanwhile
+
+  const placeName = (() => {
+    const first = Object.values(used)[0];
+    const exact = Object.values(used).find((u) => u.exact);
+    return (exact ?? first)?.region.name ?? "";
+  })();
+  $("where-note").textContent =
+    state.where === "trip" ? `Checking ${placeName}, ${countryMeta(place.country).name}.` : `Checking ${placeName}.`;
+
+  const weeksForButtons = byVirus[viruses[0]] ?? planWeeks(state.region, state.today, 4);
+  if (!weeksForButtons[state.when]?.available) state.when = Math.max(0, weeksForButtons.findIndex((w) => w.available));
+  setChildren(
+    $("when-buttons"),
+    ...weeksForButtons.map((w, i) =>
       h(
         "button",
         {
@@ -442,7 +666,7 @@ function renderPlanner(weeks) {
           disabled: !w.available,
           onclick: () => {
             state.when = i;
-            renderPlanner(weeks);
+            renderPlanner();
           },
         },
         w.label,
@@ -452,28 +676,50 @@ function renderPlanner(weeks) {
   );
 
   const out = $("advice");
-  const activity = activityById(state.activity);
-  const result = advise({ weeks, weekIndex: state.when, activity, vulnerable: state.vulnerable });
-  if (!result) {
-    setChildren(out, h("p", { class: "advice-why" }, "No forecast reaches that week yet. Try an earlier week."));
+  if (!viruses.length) {
+    setChildren(out, h("p", { class: "advice-why" }, "Tick at least one virus to check."));
     return;
   }
-  const { verdict, level, week, tips, better } = result;
-  const when = week.label.toLowerCase();
-  const why =
-    week.source === "measured"
-      ? `${activity.label}, ${when}: the latest reading is ${state.labels[level.id].toLowerCase()}.`
-      : `${activity.label}, ${when}: levels most likely ${state.labels[level.id].toLowerCase()} (${formatPct(level.p)} chance).`;
-  setChildren(out, 
-    h("div", { class: "advice-head" }, h("span", { class: "status-icon", dataset: { status: verdict.id } }, svgIcon(ICONS[verdict.id], 18)), h("p", { class: "advice-title" }, verdict.label)),
-    h("p", { class: "advice-why" }, why, state.vulnerable || activity.protectsOthers ? " Includes extra caution for people at higher risk." : ""),
-    h("ul", {}, tips.map((t) => h("li", {}, t))),
-    better
+  const activity = activityById(state.activity);
+  const advice = adviseEach({ byVirus, weekIndex: state.when, activity, vulnerable: state.vulnerable });
+  const rows = viruses.map((v) => {
+    const r = advice.results[v];
+    const u = used[v];
+    const scope = u.exact ? "" : ` (${u.region.name}-wide: no local data)`;
+    const lab = u.meta.signal.kind === "lab tests" ? " Based on lab tests." : "";
+    if (!r) {
+      return h("li", { class: "verdict-row" }, h("span", { class: "status-icon status-none" }), h("div", {}, h("strong", {}, own(state.virusLabels, v)), h("span", { class: "verdict-detail" }, `No forecast reaches that week yet${scope}.`)));
+    }
+    const detail =
+      r.week.source === "measured"
+        ? `Latest reading ${own(state.labels, r.level.id).toLowerCase()}${scope}.${lab}`
+        : `Most likely ${own(state.labels, r.level.id).toLowerCase()} (${formatPct(r.level.p)})${scope}.${lab}`;
+    return h(
+      "li",
+      { class: "verdict-row" },
+      h("span", { class: "status-icon", dataset: { status: r.verdict.id } }, svgIcon(ICONS[r.verdict.id], 16)),
+      h("div", {}, h("strong", {}, `${own(state.virusLabels, v)}: ${r.verdict.label}`), h("span", { class: "verdict-detail" }, detail)),
+    );
+  });
+  const week = weeksForButtons[state.when];
+  setChildren(
+    out,
+    h("p", { class: "advice-why" }, `${activity.label}, ${week.label.toLowerCase()}`, state.vulnerable || activity.protectsOthers ? ", with extra caution for people at higher risk." : "."),
+    h("ul", { class: "verdicts" }, rows),
+    advice.strictest && advice.tips.length
+      ? [
+          h("p", { class: "tips-for" }, viruses.length > 1 ? `Tips for ${own(state.virusLabels, advice.strictest.virus)}, the strictest of these:` : "Tips:"),
+          h("ul", { class: "tips" }, advice.tips.map((t) => h("li", {}, t))),
+        ]
+      : null,
+    advice.better
       ? h(
           "p",
           { class: "better-week" },
-          h("strong", {}, `${better.week.label} (to ${formatDate(better.week.date)})`),
-          ` looks better: ${better.verdict.label.toLowerCase()}.`,
+          h("strong", {}, `${advice.better.week.label} (to ${formatDate(advice.better.week.date)})`),
+          viruses.length > 1
+            ? ` looks better for all of them: at worst ${advice.better.verdict.label.toLowerCase()}.`
+            : ` looks better: ${advice.better.verdict.label.toLowerCase()}.`,
         )
       : null,
   );
@@ -481,7 +727,7 @@ function renderPlanner(weeks) {
 
 // ---------- areas table ----------
 function areaRows() {
-  const { data } = currentCountry();
+  const data = currentData();
   const q = state.search.trim().toLowerCase();
   return data.regions
     .filter((r) => (!state.group || r.group === state.group) && (!q || `${r.name} ${r.parent ?? ""}`.toLowerCase().includes(q)))
@@ -500,20 +746,22 @@ function sortValue(row, key) {
 }
 
 function renderAreas() {
-  const { data } = currentCountry();
-  // distribution of current levels (areas below national)
+  const data = currentData();
   const areas = data.regions.filter((r) => r.level !== "national");
   const counts = LEVEL_IDS.map((id) => areas.filter((r) => r.latest.category === id).length);
   const total = counts.reduce((a, b) => a + b, 0);
+  $("areas-heading").textContent = `All areas: ${own(state.virusLabels, state.virus)}`;
   $("areas-sub").textContent = total
-    ? `${total} areas reporting. ${LEVEL_IDS.map((id, i) => `${counts[i]} ${state.labels[id].toLowerCase()}`).join(", ")}.`
+    ? `${total} areas reporting. ${LEVEL_IDS.map((id, i) => `${counts[i]} ${own(state.labels, id).toLowerCase()}`).join(", ")}.`
     : "Only a national series is published.";
-  setChildren($("distribution"), 
-    ...LEVEL_IDS.map((id, i) => (counts[i] ? h("span", { class: `lvl-fill-${id}`, style: `flex:${counts[i]}`, title: `${state.labels[id]}: ${counts[i]}` }) : null)),
+  setChildren(
+    $("distribution"),
+    ...LEVEL_IDS.map((id, i) => (counts[i] ? h("span", { class: `lvl-fill-${id}`, style: { flex: String(counts[i]) }, title: `${own(state.labels, id)}: ${counts[i]}` }) : null)),
   );
   $("distribution").hidden = total === 0;
 
   const groups = [...new Set(data.regions.map((r) => r.group))];
+  if (state.group && !groups.includes(state.group)) state.group = "";
   const gf = $("group-filter");
   setChildren(gf, h("option", { value: "" }, "All areas"), ...groups.map((g) => h("option", { value: g }, g)));
   gf.value = state.group;
@@ -532,7 +780,7 @@ function fillAreaRows() {
   const tbody = $("areas-table").querySelector("tbody");
   const trs = rows.slice(0, limit).map(({ r, next }) => {
     const nextLevel = next ? mostLikely(next.probs).id : null;
-    const tr = h(
+    return h(
       "tr",
       {
         tabindex: "0",
@@ -550,7 +798,6 @@ function fillAreaRows() {
       h("td", { class: "num" }, h("span", { class: "trend" }, trendIcon(r.latest.trend?.label), r.latest.trend ? formatSignedPct(r.latest.trend.pct_per_week) : "–")),
       h("td", {}, nextLevel ? chip(nextLevel) : h("span", { class: "idx" }, "–")),
     );
-    return tr;
   });
   if (rows.length > limit) {
     const showAll = h("button", { type: "button", onclick: () => { state.showAll = true; fillAreaRows(); } }, "Show all");
@@ -566,8 +813,9 @@ function fillAreaRows() {
 }
 
 function selectRegionFromTable(id) {
-  selectRegion(id);
-  $("verdict").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  selectRegion(id).then(() =>
+    $("verdict").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" }),
+  );
 }
 
 function markCurrentRow() {
@@ -583,7 +831,9 @@ function renderAbout() {
   const ranges = ["below the 20th percentile", "20th to 40th percentile", "40th to 60th percentile", "60th to 80th percentile", "above the 80th percentile"];
   setChildren($("level-table"), ...LEVEL_IDS.map((id, i) => h("li", {}, chip(id), `${ranges[i]} of the past two years`)));
 
-  const model = idx.model;
+  const label = own(state.virusLabels, state.virus);
+  const model = idx.models[state.virus];
+  $("metrics-heading").textContent = `${label} model: back-test on the last year`;
   const t = $("metrics-table");
   const head = h("thead", {}, h("tr", {}, ["Weeks ahead", "Typical miss", "No-change miss", "Better by", "Right level"].map((c, i) => h("th", { scope: "col", class: i ? "num" : null }, c))));
   const body = h(
@@ -603,39 +853,43 @@ function renderAbout() {
   );
   setChildren(t, head, body);
 
-  const { meta } = currentCountry();
+  const country = countryMeta(state.countryId);
   const countryRows = model.by_country?.[state.countryId] ?? [];
   const fallback = model.fallback?.[state.countryId] ?? [];
   const skills = countryRows.filter((r) => r.uses_model).map((r) => r.skill_vs_no_change);
   let countryNote = "";
   if (countryRows.length) {
     if (!skills.length) {
-      countryNote = `For ${meta.name} the model didn't beat no-change in testing, so its forecasts assume levels stay where they are, with the model's uncertainty range.`;
+      countryNote = `For ${country.name} the ${inText(state.virus)} model didn't beat no-change in testing, so its forecasts assume levels stay where they are, with the model's uncertainty range.`;
     } else {
       const lo = Math.round(100 * Math.min(...skills));
       const hi = Math.round(100 * Math.max(...skills));
-      countryNote = `For ${meta.name} the model was ${lo === hi ? `${lo}%` : `${lo}–${hi}%`} more accurate than no-change${fallback.length ? `, and uses no-change ${fallback.length === 1 ? `for ${fallback[0]}` : `for ${fallback[0]}–${fallback[fallback.length - 1]}`} weeks ahead, where it wasn't` : ""}.`;
+      countryNote = `For ${country.name} the ${inText(state.virus)} model was ${lo === hi ? `${lo}%` : `${lo}–${hi}%`} more accurate than no-change${fallback.length ? `, and uses no-change ${fallback.length === 1 ? `for ${fallback[0]}` : `for ${fallback[0]}–${fallback[fallback.length - 1]}`} weeks ahead, where it wasn't` : ""}.`;
     }
   }
   const baseline = model.by_horizon.map((m) => Math.round(100 * m.category_accuracy_no_change));
   $("metrics-note").textContent =
-    `Tested on ${model.n_series} series, on weeks from ${formatDate(model.holdout_start, true)} onward that the model never saw. "Typical miss" is how far the forecast usually lands from the real level. "Right level" counts forecasts that landed in the correct band; assuming no change managed ${Math.min(...baseline)}–${Math.max(...baseline)}%. ${countryNote}`;
+    `Tested on ${model.n_series} ${inText(state.virus)} series, on weeks from ${formatDate(model.holdout_start, true)} onward that the model never saw. "Typical miss" is how far the forecast usually lands from the real level. "Right level" counts forecasts that landed in the correct band; assuming no change managed ${Math.min(...baseline)}–${Math.max(...baseline)}%. ${countryNote}`;
 
-  const src = meta.source;
-  setChildren($("source"), 
-    h("a", { href: src.url, target: "_blank", rel: "noopener" }, src.publisher),
-    `. ${src.metric}. ${src.notes} Licence: ${src.license}.`,
+  const signal = currentMeta().signal;
+  setChildren(
+    $("source"),
+    safeUrl(country.source.url)
+      ? h("a", { href: safeUrl(country.source.url), target: "_blank", rel: "noopener noreferrer" }, country.source.publisher)
+      : country.source.publisher,
+    `. ${signal.metric}. ${signal.notes} Licence: ${country.source.license}.`,
   );
-  setChildren($("footer-text"), 
+  setChildren(
+    $("footer-text"),
     `Data rebuilt ${formatDateTime(idx.generated_at)}. Public data from health agencies in six countries. `,
-    h("a", { href: REPO_URL, target: "_blank", rel: "noopener" }, "Source code"),
+    h("a", { href: REPO_URL, target: "_blank", rel: "noopener noreferrer" }, "Source code"),
     ". Not medical advice.",
   );
 }
 
 // ---------- events ----------
 function bindEvents() {
-  $("country-select").addEventListener("change", (e) => selectCountry(e.target.value, store.get(`region:${e.target.value}`, null)));
+  $("country-select").addEventListener("change", (e) => safeShow(e.target.value, store.get(`region:${e.target.value}`, null), state.virus));
   $("area-select").addEventListener("change", (e) => selectRegion(e.target.value));
   $("range-buttons").addEventListener("click", (e) => {
     const b = e.target.closest("button");
@@ -647,14 +901,30 @@ function bindEvents() {
   $("scale-buttons").addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b) return;
-    state.scale = b.dataset.scale;
+    state.scale = b.dataset.scale === "log" ? "log" : "linear";
     store.set("scale", state.scale);
     renderChart();
   });
   $("vulnerable").addEventListener("change", (e) => {
     state.vulnerable = e.target.checked;
-    store.set("vulnerable", state.vulnerable);
-    renderPlanner(planWeeks(state.region, state.today, 4));
+    renderPlanner();
+  });
+  $("where-buttons").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-where]");
+    if (!b) return;
+    state.where = b.dataset.where === "trip" ? "trip" : "here";
+    await renderTripPickers();
+    renderPlanner();
+  });
+  $("trip-country").addEventListener("change", async (e) => {
+    state.trip = { country: e.target.value, region: null };
+    await renderTripPickers();
+    renderPlanner();
+  });
+  $("trip-area").addEventListener("change", (e) => {
+    state.trip = { ...state.trip, region: e.target.value };
+    store.set("trip", state.trip);
+    renderPlanner();
   });
   $("group-filter").addEventListener("change", (e) => {
     state.group = e.target.value;
@@ -674,9 +944,11 @@ function bindEvents() {
     fillAreaRows();
   });
   window.addEventListener("hashchange", () => {
-    const { country, region } = readHash();
-    if (country && country !== state.countryId) selectCountry(country, region);
-    else if (region && region !== state.region?.id) selectRegion(region);
+    const { country, region, virus } = readHash();
+    if (!country || !countryMeta(country)) return;
+    if (country !== state.countryId || (region && region !== state.region?.id) || (virus ?? "covid") !== state.virus) {
+      safeShow(country, region, virus ?? "covid");
+    }
   });
   new ResizeObserver(() => {
     cancelAnimationFrame(chartFrame);
@@ -691,17 +963,29 @@ async function init() {
     $("load-status").textContent = `Couldn't load the data (${err.message}). If you're running this locally, build it first with "python -m wastewater build" and serve the site folder.`;
     return;
   }
-  if (!state.index.countries.length) {
+  if (!state.index.countries?.length) {
     $("load-status").textContent = "The last data build produced no countries. Check the build log.";
     return;
   }
-  state.labels = Object.fromEntries(state.index.categories.map((c) => [c.id, c.label]));
+  state.labels = Object.assign(Object.create(null), Object.fromEntries(state.index.categories.map((c) => [c.id, c.label])));
+  state.virusLabels = Object.assign(Object.create(null), Object.fromEntries(state.index.viruses.map((v) => [v.id, v.label])));
+  if (!own(state.virusLabels, state.virus)) state.virus = "covid";
+  if (!Array.isArray(state.planViruses)) state.planViruses = ["covid", "flu", "rsv"];
+  try {
+    localStorage.removeItem("sewer-signal:vulnerable"); // saved by older versions
+  } catch {
+    /* storage unavailable */
+  }
   renderActivities();
   bindEvents();
   const fromHash = readHash();
-  const country = state.index.countries.some((c) => c.id === fromHash.country) ? fromHash.country : store.get("country", state.index.default_country);
+  const country = countryMeta(fromHash.country) ? fromHash.country : store.get("country", state.index.default_country);
   const region = fromHash.country === country ? fromHash.region : store.get(`region:${country}`, null);
-  await selectCountry(country, region);
+  try {
+    await show(countryMeta(country) ? country : state.index.default_country, region, fromHash.country === country ? fromHash.virus ?? "covid" : state.virus);
+  } catch (err) {
+    $("load-status").textContent = `Couldn't load the data (${err.message}).`;
+  }
 }
 
 init();

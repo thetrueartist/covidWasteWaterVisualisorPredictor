@@ -85,3 +85,25 @@ test("advise suggests a gentler week when there is one", () => {
   assert.ok(result.tips.length > 0);
   assert.equal(lowestWeek(weeks), 2);
 });
+
+test("adviseEach keeps viruses separate and finds a week that suits all of them", async () => {
+  const { adviseEach } = await import("../../site/js/advisor.js");
+  const mk = (cats) => ({
+    latest: { date: "2026-09-20", category: "low", index: 30 },
+    forecast: ["2026-09-27", "2026-10-04", "2026-10-11", "2026-10-18", "2026-10-25", "2026-11-01"].map((date, i) => ({
+      date, probs: oneHot(cats[i]), category: cats[i], index: 50,
+    })),
+  });
+  const today = new Date(2026, 9, 2);
+  const byVirus = {
+    covid: planWeeks(mk(["very_low", "very_low", "very_low", "very_low", "very_low", "very_low"]), today, 4),
+    flu: planWeeks(mk(["high", "very_high", "very_high", "low", "low", "low"]), today, 4),
+  };
+  const out = adviseEach({ byVirus, weekIndex: 0, activity: activityById("crowd"), vulnerable: false });
+  assert.equal(out.results.covid.verdict.id, "go");
+  assert.equal(out.results.flu.verdict.id, "avoid"); // this week = w/e 4 Oct: very high flu + packed crowd
+  assert.equal(out.results.covid.level.id, "very_low"); // verdicts stay per virus
+  assert.equal(out.strictest.virus, "flu");
+  assert.equal(out.better.week.date, "2026-10-18"); // first week flu drops to low
+  assert.ok(out.tips.length > 0);
+});

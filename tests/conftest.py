@@ -1,3 +1,10 @@
+import os
+
+# The test models are tiny, so one thread is quicker, and it stops OpenMP from
+# stalling when something else (like a real build) is using every core.
+# This has to happen before numpy or scikit-learn load.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import numpy as np
 import pandas as pd
 import pytest

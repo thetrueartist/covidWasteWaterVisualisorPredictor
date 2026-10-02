@@ -30,7 +30,10 @@ body:
     id: logs
     attributes:
       label: Output or logs
-      description: Paste any error output. For the build, run it with -v.
+      description: >-
+        Paste any error output. For the build, run it with -v. Issues are public, so first
+        remove anything you'd rather not share: your username and folder paths, and IP addresses
+        from .server.log.
       render: text
   - type: input
     id: env

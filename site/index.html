@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sewer Signal</title>
-<meta name="description" content="COVID-19 wastewater levels and forecasts for Scotland, the US, Canada, Germany, the Netherlands and New Zealand, with a go-or-avoid activity planner.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&display=swap">
+<meta name="description" content="COVID-19, flu and RSV levels and forecasts from wastewater for Scotland, the US, Canada, Germany, the Netherlands and New Zealand, with a go-or-avoid activity planner.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="fonts.css">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -18,6 +19,10 @@
       <span>Sewer Signal</span>
     </a>
     <div class="pickers">
+      <div class="picker">
+        <span class="picker-label" id="virus-label">Virus</span>
+        <div class="segmented" role="group" aria-labelledby="virus-label" id="virus-buttons"></div>
+      </div>
       <label class="picker">
         <span class="picker-label">Country</span>
         <select id="country-select"></select>
@@ -35,6 +40,7 @@
 
   <section id="verdict" class="verdict" hidden aria-labelledby="verdict-heading">
     <p class="eyebrow" id="verdict-eyebrow"></p>
+    <p id="virus-note" class="notice" hidden></p>
     <h1 id="verdict-heading" class="verdict-heading"></h1>
     <p id="verdict-now" class="verdict-now"></p>
     <p id="verdict-advice" class="verdict-advice"></p>
@@ -92,6 +98,28 @@
           <div class="activity-list" id="activity-list"></div>
         </fieldset>
         <fieldset class="field">
+          <legend>Where</legend>
+          <div class="segmented segmented-wide" role="group" aria-label="Where" id="where-buttons">
+            <button type="button" data-where="here" aria-pressed="true">Here</button>
+            <button type="button" data-where="trip" aria-pressed="false">Somewhere else</button>
+          </div>
+          <div class="trip-pickers" id="trip-pickers" hidden>
+            <label class="picker">
+              <span class="picker-label">Country</span>
+              <select id="trip-country"></select>
+            </label>
+            <label class="picker">
+              <span class="picker-label">Area</span>
+              <select id="trip-area"></select>
+            </label>
+          </div>
+          <p class="where-note" id="where-note"></p>
+        </fieldset>
+        <fieldset class="field">
+          <legend>Viruses to check</legend>
+          <div class="virus-checks" id="virus-checks"></div>
+        </fieldset>
+        <fieldset class="field">
           <legend>When</legend>
           <div class="segmented segmented-wide" role="group" id="when-buttons"></div>
         </fieldset>
@@ -143,17 +171,18 @@
     <div class="about-grid">
       <div class="prose">
         <h3>Reading the levels</h3>
-        <p>Infected people shed SARS-CoV-2 in their stool, often before they feel ill and whether or not they test. Treatment works sample incoming sewage and measure the virus's genetic material, so wastewater shows community spread without relying on testing.</p>
-        <p>Each area is compared with its own previous two years. Units differ between countries and labs, so a level here means where this week sits in that area's recent history.</p>
+        <p>Infected people shed SARS-CoV-2, flu and RSV into sewage, often before they feel ill and whether or not they test. Treatment works sample incoming sewage and measure each virus's genetic material, so wastewater shows community spread without relying on testing.</p>
+        <p>Each area is compared with its own previous two years, separately for each virus. Units differ between countries and labs, so a level here means where this week sits in that area's recent history.</p>
+        <p>Where a country doesn't publish flu or RSV in wastewater (Scotland), the site uses its laboratory surveillance instead and says so. Lab data depends on who gets tested and lags wastewater by a few days.</p>
         <ul class="level-table" id="level-table"></ul>
         <h3>The forecast</h3>
-        <p>One gradient-boosted model is trained on every area in all six countries at once. It looks at how fast each area's level has been changing, and at the trend across its whole country. It predicts a range for each of the next six weeks, not a single number. Published data runs one to two weeks behind, so part of the forecast covers weeks that have already started.</p>
+        <p>Each virus has its own gradient-boosted models, trained on every area that publishes that virus. They look at how fast each area's level has been changing, and at the trend across its whole country. They predict a range for each of the next six weeks, not a single number. Which inputs each virus's model uses was chosen by testing the options on two separate held-out years. Published data runs one to two weeks behind, so part of the forecast covers weeks that have already started.</p>
         <p>Where the model did no better than "assume nothing changes" in back-testing, that country's forecast uses no-change instead. The table shows how it scored on the past year, which it never saw during training.</p>
         <h3>What it can't tell you</h3>
         <p>Wastewater tracks community trends, not the risk of any single outing. Small treatment works give noisy readings. The advice here follows general public-health practice. It is not medical advice. If you're unwell, stay home. If you're at high risk, follow your clinician's guidance.</p>
       </div>
       <div>
-        <h3>Back-test on the last year</h3>
+        <h3 id="metrics-heading">Back-test on the last year</h3>
         <div class="table-scroll"><table class="metrics" id="metrics-table"></table></div>
         <p class="fine" id="metrics-note"></p>
         <h3>Data source</h3>

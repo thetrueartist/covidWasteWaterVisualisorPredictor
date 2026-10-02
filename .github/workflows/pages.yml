@@ -3,73 +3,88 @@ name: Build data and deploy site
 # Refreshes the data and forecasts every morning (UTC) and publishes the
 # static site to GitHub Pages. Enable it once under
 # Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+# Until then the check job skips the rest instead of failing.
 
 on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
   push:
+    branches: [main]
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# Nothing by default; each job asks for exactly what it needs.
+permissions: {}
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  # Skip quietly (instead of failing every day) until Pages is turned on.
-  # Private repositories need a paid plan for Pages; see docs/hosting.md.
   check:
-    # Deploy from the repository's default branch only, whatever it's called.
-    if: >-
-      github.event_name != 'push' ||
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Check Pages is on
+    # Deploy from the default branch only, including manual runs.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    permissions:
+      pages: read # to ask whether Pages is turned on
     outputs:
       enabled: ${{ steps.pages.outputs.enabled }}
     steps:
       - id: pages
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          if gh api "repos/${{ github.repository }}/pages" --silent 2>/dev/null; then
+          if out=$(gh api "repos/$REPO/pages" --silent 2>&1); then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
+          elif grep -q "HTTP 404" <<<"$out"; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=GitHub Pages is off::Skipping the build and deploy. Turn it on under Settings > Pages > Source: GitHub Actions, or see docs/hosting.md for other hosts."
+          else
+            # Anything else (rate limit, outage) is a real failure, not "Pages is off".
+            echo "::error title=Couldn't check GitHub Pages::$out"
+            exit 1
           fi
 
   build:
+    name: Build data and site
     needs: check
     if: needs.check.outputs.enabled == 'true'
     runs-on: ubuntu-latest
+    # A stalled download can't hold the runner for GitHub's 6-hour default.
+    timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install -e .
+      - run: pip install --require-hashes -r requirements.txt
       # Last good downloads. If a portal is down, the build falls back to these.
-      - uses: actions/cache@v4
+      # Only default-branch runs can write this cache, so other branches can't seed it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache
           key: downloads-${{ github.run_id }}
           restore-keys: downloads-
       - run: python -m wastewater -v build
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
   deploy:
+    name: Deploy
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write # to publish the site
+      id-token: write # to prove to Pages that this workflow made the deployment
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
