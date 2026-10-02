@@ -58,7 +58,8 @@ the data every morning and publishes the site.
 The site appears at
 `https://thetrueartist.github.io/covidWasteWaterVisualisorPredictor/`.
 Pages on a private repository needs a paid GitHub plan. On a public
-repository it's free.
+repository it's free. While Pages is off, the workflow skips itself with a
+notice instead of failing, so a private repo can use option 1 or 4 instead.
 
 ## 3. Behind Caddy or nginx
 

@@ -20,11 +20,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  # Skip quietly (instead of failing every day) until Pages is turned on.
+  # Private repositories need a paid plan for Pages; see docs/hosting.md.
+  check:
     # Deploy from the repository's default branch only, whatever it's called.
     if: >-
       github.event_name != 'push' ||
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" --silent 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=GitHub Pages is off::Skipping the build and deploy. Turn it on under Settings > Pages > Source: GitHub Actions, or see docs/hosting.md for other hosts."
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
