@@ -107,3 +107,22 @@ test("adviseEach keeps viruses separate and finds a week that suits all of them"
   assert.equal(out.better.week.date, "2026-10-18"); // first week flu drops to low
   assert.ok(out.tips.length > 0);
 });
+
+test("adviseEach never calls a week better when a virus has no forecast for it", async () => {
+  const { adviseEach } = await import("../../site/js/advisor.js");
+  const mk = (cats) => ({
+    latest: { date: "2026-09-20", category: "low", index: 30 },
+    forecast: cats.map((c, i) => ({
+      date: ["2026-09-27", "2026-10-04", "2026-10-11", "2026-10-18", "2026-10-25", "2026-11-01"][i], probs: oneHot(c), category: c, index: 50,
+    })),
+  });
+  const today = new Date(2026, 9, 2);
+  const byVirus = {
+    covid: planWeeks(mk(["very_low", "very_low", "very_low", "very_low", "very_low", "very_low"]), today, 4),
+    rsv: planWeeks(mk(["very_high", "very_high"]), today, 4), // stale area: forecast stops early
+  };
+  assert.ok(!byVirus.rsv[2].available);
+  const out = adviseEach({ byVirus, weekIndex: 0, activity: activityById("crowd"), vulnerable: true });
+  assert.equal(out.strictest.virus, "rsv");
+  assert.equal(out.better, null); // the weeks after it have no RSV forecast, so they're not "better"
+});

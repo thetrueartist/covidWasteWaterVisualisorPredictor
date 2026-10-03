@@ -8,12 +8,10 @@ Values are virus particles per 100,000 inhabitants per day.
 
 from __future__ import annotations
 
-import io
-
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids
+from .base import RawSeries, Signal, Source, SourceInfo, read_csv, slugify, unique_ids
 
 BASE = "https://data.rivm.nl/covid-19/"
 NATIONAL_URL = BASE + "COVID-19_rioolwaterdata_landelijk.csv"
@@ -21,7 +19,7 @@ SITES_URL = BASE + "COVID-19_rioolwaterdata.csv"
 
 
 def _read(text: str) -> pd.DataFrame:
-    df = pd.read_csv(io.StringIO(text), sep=";")
+    df = read_csv(text, ["Date_measurement", "RNA_flow_per_100000", "RWZI_AWZI_code", "RWZI_AWZI_name"], sep=";")
     df["date"] = pd.to_datetime(df["Date_measurement"], errors="coerce")
     df["value"] = pd.to_numeric(df["RNA_flow_per_100000"], errors="coerce")
     return df.dropna(subset=["date", "value"])

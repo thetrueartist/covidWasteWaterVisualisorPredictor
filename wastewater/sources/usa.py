@@ -102,18 +102,25 @@ class UnitedStates(Source):
         },
     )
 
+    def parts(self):
+        # Each virus is a separate query, so each can fail on its own.
+        return [((pathogen,), lambda fetcher, p=pathogen: self.fetch_virus(fetcher, p)) for pathogen in TARGETS]
+
     def fetch(self, fetcher: Fetcher) -> list[RawSeries]:
+        return [s for pathogen in TARGETS for s in self.fetch_virus(fetcher, pathogen)]
+
+    def fetch_virus(self, fetcher: Fetcher, pathogen: str) -> list[RawSeries]:
+        target = TARGETS[pathogen]
+        nat = _query(fetcher, target, "week_end, median(site_wval) AS wval, count(site) AS n_sites", "week_end")
+        states = _query(
+            fetcher,
+            target,
+            "state_territory, week_end, median(site_wval) AS wval, count(site) AS n_sites",
+            "state_territory, week_end",
+        )
         series: list[RawSeries] = []
-        for pathogen, target in TARGETS.items():
-            nat = _query(fetcher, target, "week_end, median(site_wval) AS wval, count(site) AS n_sites", "week_end")
-            states = _query(
-                fetcher,
-                target,
-                "state_territory, week_end, median(site_wval) AS wval, count(site) AS n_sites",
-                "state_territory, week_end",
-            )
-            if not nat.empty:
-                series.append(parse_national(nat, pathogen))
-            if not states.empty:
-                series.extend(parse_states(states, pathogen))
+        if not nat.empty:
+            series.append(parse_national(nat, pathogen))
+        if not states.empty:
+            series.extend(parse_states(states, pathogen))
         return series

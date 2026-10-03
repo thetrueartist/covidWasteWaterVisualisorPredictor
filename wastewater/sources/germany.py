@@ -16,12 +16,10 @@ curves because plants in one state may use different assays.
 
 from __future__ import annotations
 
-import io
-
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids, weighted_weekly_mean
+from .base import RawSeries, Signal, Source, SourceInfo, read_csv, slugify, unique_ids, weighted_weekly_mean
 
 BASE = "https://raw.githubusercontent.com/robert-koch-institut/Abwassersurveillance_AMELAG/main/"
 AGG_URL = BASE + "amelag_aggregierte_kurve.tsv"
@@ -63,7 +61,7 @@ def _value_column(df: pd.DataFrame) -> pd.Series:
 
 
 def parse_national(text: str, pathogens=tuple(TYPES)) -> list[RawSeries]:
-    df = pd.read_csv(io.StringIO(text), sep="\t")
+    df = read_csv(text, ["typ", "datum", "viruslast", "viruslast_normalisiert"], sep="\t")
     out = []
     for pathogen in pathogens:
         sub = df[df["typ"] == NATIONAL_TYPE[pathogen]]
@@ -85,10 +83,8 @@ def _pick_assay(g: pd.DataFrame, preferred: tuple) -> pd.DataFrame:
 
 
 def parse_sites(text: str, pathogens=tuple(TYPES)) -> list[RawSeries]:
-    df = pd.read_csv(
-        io.StringIO(text),
-        sep="\t",
-        usecols=["standort", "bundesland", "datum", "viruslast", "viruslast_normalisiert", "einwohner", "typ"],
+    df = read_csv(
+        text, ["standort", "bundesland", "datum", "viruslast", "viruslast_normalisiert", "einwohner", "typ"], sep="\t"
     )
     df["value"] = _value_column(df)
     df["einwohner"] = pd.to_numeric(df["einwohner"], errors="coerce")

@@ -49,8 +49,8 @@ and `sewer-signal-refresh.timer`), otherwise cron. Open
 The repo already has a workflow (`.github/workflows/pages.yml`) that builds
 the data every morning and publishes the site.
 
-1. Make sure the code is on the repository's default branch. The workflow
-   deploys from whichever branch that is.
+1. Make sure the code is on the `main` branch. The workflow only deploys
+   from `main`, so other branches can't publish anything.
 2. In the repo, go to **Settings → Pages → Build and deployment → Source** and
    choose **GitHub Actions**.
 3. Run the **Build data and deploy site** workflow once from the Actions tab,

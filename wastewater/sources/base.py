@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import math
 import re
 import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,9 @@ LEVELS = ("national", "region", "local", "site")
 # one such row would shift the back-test window for every country.
 EARLIEST = pd.Timestamp("2020-01-01")
 MAX_DAYS_AHEAD = 7
+# Far above any real reading (the largest, Dutch RNA flow per 100,000 people,
+# is about 3e15) but small enough that sums and means can't overflow.
+MAX_VALUE = 1e20
 
 # Viruses, in the order the site offers them. Each is modelled separately.
 PATHOGENS = {
@@ -84,8 +88,9 @@ class RawSeries:
         s.index = dates.normalize()
         latest = pd.Timestamp.now().normalize() + pd.Timedelta(days=MAX_DAYS_AHEAD)
         v = s.to_numpy()
-        ok = np.isfinite(v) & (v >= 0) & (s.index >= EARLIEST) & (s.index <= latest)
-        self.values = s[ok].groupby(level=0).mean().sort_index()
+        ok = np.isfinite(v) & (v >= 0) & (v <= MAX_VALUE) & (s.index >= EARLIEST) & (s.index <= latest)
+        merged = s[ok].groupby(level=0).mean().sort_index()
+        self.values = merged[np.isfinite(merged.to_numpy())]
         self.population = _positive_or_none(self.population)
 
 
@@ -103,6 +108,24 @@ class Source(ABC):
     @abstractmethod
     def fetch(self, fetcher: Fetcher) -> list[RawSeries]:
         """Download and parse every area this source publishes."""
+
+    def parts(self) -> list[tuple[tuple[str, ...], Callable[[Fetcher], list[RawSeries]]]]:
+        """Pieces of ``fetch`` that can fail on their own, with the viruses each covers.
+
+        A source that publishes each virus in separate files overrides this,
+        so a broken flu file can't take its COVID data down too.
+        """
+        return [(tuple(self.info.signals), self.fetch)]
+
+
+def read_csv(text: str, columns, **kwargs) -> pd.DataFrame:
+    """Parse CSV text, keeping only the columns a parser uses.
+
+    ``columns`` is a collection of names or a predicate. A file padded with
+    thousands of extra columns then can't blow up memory.
+    """
+    keep = columns if callable(columns) else (lambda c, wanted=frozenset(columns): c in wanted)
+    return pd.read_csv(io.StringIO(text), usecols=keep, **kwargs)
 
 
 def slugify(text: str) -> str:
@@ -143,13 +166,15 @@ def unique_ids(series: Iterable[RawSeries]) -> list[RawSeries]:
     The same place keeps the same id across viruses, so the site can match an
     area between COVID, flu and RSV.
     """
-    seen: dict[tuple[str, str], int] = {}
+    used: set[tuple[str, str]] = set()
     out = []
     for s in series:
-        key = (s.pathogen, s.region_id)
-        n = seen.get(key, 0)
-        seen[key] = n + 1
-        if n:
-            s.region_id = f"{s.region_id}-{n + 1}"
+        base = s.region_id or "area"
+        rid, n = base, 1
+        while (s.pathogen, rid) in used:  # also skips ids that a suffix would collide with
+            n += 1
+            rid = f"{base}-{n}"
+        used.add((s.pathogen, rid))
+        s.region_id = rid
         out.append(s)
     return out

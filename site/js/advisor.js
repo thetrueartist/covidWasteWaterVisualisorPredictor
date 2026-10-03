@@ -183,7 +183,8 @@ export function lowestWeek(weeks) {
  * Advice for several viruses at once, kept separate. `byVirus` maps a virus
  * id to its plannable weeks (from planWeeks). Returns one result per virus,
  * the strictest verdict among them (so tips can match it), and a week where
- * the strictest verdict would be gentler, if there is one.
+ * every virus has a forecast and the strictest verdict would be gentler, if
+ * there is one.
  */
 export function adviseEach({ byVirus, weekIndex, activity, vulnerable }) {
   const results = {};
@@ -204,11 +205,14 @@ export function adviseEach({ byVirus, weekIndex, activity, vulnerable }) {
     return worst;
   };
   const strictest = strictestAt(weekIndex);
+  // A week only counts as better if every virus has a forecast for it:
+  // an unknown is never better than a known risk.
+  const coversAll = (i) => Object.values(byVirus).every((weeks) => weeks[i]?.available);
   let better = null;
   if (strictest) {
     const count = Math.max(...Object.values(byVirus).map((w) => w.length));
     for (let i = 0; i < count; i++) {
-      if (i === weekIndex) continue;
+      if (i === weekIndex || !coversAll(i)) continue;
       const s = strictestAt(i);
       if (s && verdictRank(s.verdict.id) < verdictRank(strictest.verdict.id) && (!better || s.score < better.score)) {
         better = s;

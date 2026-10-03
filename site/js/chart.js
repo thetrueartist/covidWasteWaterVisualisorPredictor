@@ -23,6 +23,7 @@ function niceStep(raw) {
 }
 
 function linearTicks(max, count) {
+  if (!(max > 0) || !Number.isFinite(max)) max = 1; // an all-zero window still needs a scale
   const step = niceStep(max / count);
   const ticks = [];
   for (let v = 0; v <= max + step * 1e-9; v += step) ticks.push(v);
@@ -92,8 +93,8 @@ export function drawChart(container, region, opts) {
   const firstData = hist.findIndex((p) => p.smooth != null);
   let lastObs = hist.length - 1;
   while (lastObs > 0 && hist[lastObs].smooth == null) lastObs--;
-  const from = opts.weeks ? Math.max(firstData, hist.length - opts.weeks) : firstData;
-  const vis = hist.slice(from);
+  const from = opts.weeks > 0 ? Math.max(firstData, hist.length - opts.weeks) : firstData;
+  const vis = hist.slice(Math.max(0, Math.min(from, hist.length - 1)));
   const fc = region.forecast.map((f) => ({ date: parseISO(f.date), q: f.q, f }));
   const anchor = hist[lastObs];
 
@@ -111,8 +112,9 @@ export function drawChart(container, region, opts) {
   let y, yTicks, yMin, yMax;
   if (logScale) {
     const positives = [...smoothVals, ...rawVals, ...fc.map((f) => f.q[0])].filter((v) => v > 0);
-    yMin = Math.max(Math.min(...positives) * 0.8, yMaxData / 1e5);
-    yMax = yMaxData * 1.25;
+    const top = yMaxData > 0 && Number.isFinite(yMaxData) ? yMaxData : 1;
+    yMin = positives.length ? Math.max(Math.min(...positives) * 0.8, top / 1e5) : top / 100;
+    yMax = top * 1.25;
     const lmin = Math.log10(yMin);
     const lmax = Math.log10(yMax);
     y = (v) => ph - ((Math.log10(Math.max(v, yMin)) - lmin) / (lmax - lmin)) * ph;

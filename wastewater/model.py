@@ -179,7 +179,7 @@ class Dataset:
 
     def usable(self) -> pd.Series:
         df = self.frame
-        return (df["date"] >= TRAIN_START) & df["ys"].notna() & df["d1"].notna()
+        return (df["date"] >= TRAIN_START) & np.isfinite(df["ys"]) & df["d1"].notna()
 
     def latest(self, pathogen: str) -> pd.Timestamp:
         return self.frame.loc[self.frame["pathogen"] == pathogen, "date"].max()
@@ -211,7 +211,7 @@ def _new_model(spec: ModelSpec, q: float, seed: int) -> HistGradientBoostingRegr
 
 def _train_mask(ds: Dataset, pathogen: str, spec: ModelSpec, until: pd.Timestamp | None, h: int) -> pd.Series:
     df = ds.frame
-    mask = ds.usable() & pd.Series(site_sample(df), index=df.index) & df[f"target_h{h}"].notna()
+    mask = ds.usable() & pd.Series(site_sample(df), index=df.index) & np.isfinite(df[f"target_h{h}"])
     if not spec.pool_viruses:
         mask &= df["pathogen"] == pathogen
     if until is not None:
@@ -324,7 +324,7 @@ def _skill(err: np.ndarray, baseline: np.ndarray) -> float:
 def _test_rows(ds: Dataset, pathogen: str, start: pd.Timestamp, end: pd.Timestamp | None, h: int) -> pd.DataFrame:
     """Forecast origins from ``start`` on whose target week is no later than ``end``."""
     df = ds.frame
-    mask = ds.usable() & (df["pathogen"] == pathogen) & (df["date"] >= start) & df[f"target_h{h}"].notna()
+    mask = ds.usable() & (df["pathogen"] == pathogen) & (df["date"] >= start) & np.isfinite(df[f"target_h{h}"])
     if end is not None:
         mask &= df["date"] + pd.Timedelta(weeks=h) <= end
     return df[mask]

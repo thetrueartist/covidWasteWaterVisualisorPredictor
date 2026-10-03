@@ -117,9 +117,14 @@ def rolling_index(ys: pd.Series, window: int = WINDOW_WEEKS, min_periods: int = 
     return pd.Series(out, index=ys.index)
 
 
+# Smallest log offset, so log(0 + offset) stays finite even for tiny values.
+MIN_OFFSET = 1e-9
+
+
 def log_offset(weekly: pd.Series) -> float:
     positive = weekly[weekly > 0]
-    return float(OFFSET_FRACTION * positive.median()) if len(positive) else 1.0
+    offset = float(OFFSET_FRACTION * positive.median()) if len(positive) else 1.0
+    return max(offset, MIN_OFFSET) if np.isfinite(offset) else 1.0
 
 
 def prepare(raw: RawSeries, country: str, hemisphere: str, lab: bool = False) -> Prepared | None:
@@ -127,7 +132,10 @@ def prepare(raw: RawSeries, country: str, hemisphere: str, lab: bool = False) ->
     if weekly.notna().sum() < 8:
         return None
     offset = log_offset(weekly)
-    y = fill_short_gaps(np.log(weekly + offset))
+    logged = np.log(weekly + offset)
+    if not np.isfinite(logged.dropna().to_numpy()).all():
+        return None  # shouldn't happen after RawSeries checks; never let it reach a model
+    y = fill_short_gaps(logged)
     ys = causal_smooth(y)
     return Prepared(
         country=country,

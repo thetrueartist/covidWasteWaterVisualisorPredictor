@@ -8,12 +8,10 @@ influenza (``fluA`` + ``fluB``) and RSV (``rsv``).
 
 from __future__ import annotations
 
-import io
-
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids
+from .base import RawSeries, Signal, Source, SourceInfo, read_csv, slugify, unique_ids
 
 URL = "https://health-infobase.canada.ca/src/data/wastewater/wastewater_aggregate.csv"
 
@@ -50,7 +48,7 @@ def _series_for(df: pd.DataFrame, pathogen: str, provinces: set) -> list[RawSeri
 
 
 def parse(text: str, pathogens=tuple(MEASURES)) -> list[RawSeries]:
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, ["site", "weekstart", "w_avg", "province", "Location", "measureid"])
     df = df[df["site"].isna()].copy()
     # weekstart is the Sunday that starts the epi week; label by its Saturday end.
     df["date"] = pd.to_datetime(df["weekstart"], errors="coerce") + pd.Timedelta(days=6)

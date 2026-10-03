@@ -34,6 +34,11 @@ const store = {
   },
 };
 
+/** A saved preference, if it's one of the values the page offers. */
+function oneOf(value, allowed, fallback) {
+  return allowed.includes(value) ? value : fallback;
+}
+
 const state = {
   index: null,
   labels: {},
@@ -44,8 +49,8 @@ const state = {
   data: new Map(), // "country-virus" -> loaded data
   region: null,
   fellBack: null, // area asked for that this virus doesn't cover
-  weeks: store.get("weeks", 52),
-  scale: store.get("scale", "linear"),
+  weeks: oneOf(store.get("weeks", 52), [26, 52, 104, 0], 52),
+  scale: store.get("scale", "linear") === "log" ? "log" : "linear",
   activity: store.get("activity", "restaurant"),
   when: 0,
   vulnerable: false, // deliberately not saved: health-related, and a github.io origin is shared
@@ -245,13 +250,16 @@ function writeHash() {
 }
 
 // ---------- selection ----------
+let showToken = 0;
 async function show(countryId, regionId, virus) {
+  const token = ++showToken;
   const meta = countryMeta(countryId) ?? countryMeta(state.index.default_country);
   const available = virusesOf(meta.id);
   const wanted = virus ?? state.virus;
   const chosen = available.includes(wanted) ? wanted : available[0];
   $("main").setAttribute("aria-busy", "true");
   const data = await loadData(meta.id, chosen);
+  if (token !== showToken) return; // a newer selection started while this one loaded
 
   const countryChanged = meta.id !== state.countryId;
   state.countryId = meta.id;
@@ -269,7 +277,8 @@ async function show(countryId, regionId, virus) {
   state.region = findRegion(data, vMeta, wantedRegion);
   state.fellBack = wantedRegion && state.region.id !== wantedRegion ? { id: wantedRegion, wantedVirus: wanted } : null;
   if (!state.fellBack) store.set(`region:${meta.id}`, state.region.id);
-  if (wanted !== chosen) state.fellBack = { ...(state.fellBack ?? {}), virusMissing: wanted };
+  // Only a real virus id gets a note; anything else (say from a hand-edited link) is ignored.
+  if (wanted !== chosen && own(state.virusLabels, wanted)) state.fellBack = { ...(state.fellBack ?? {}), virusMissing: wanted };
 
   renderVirusButtons();
   renderCountryPicker();
@@ -579,7 +588,10 @@ function plannerPlace() {
   return { country: state.countryId, region: state.fellBack?.id ?? state.region.id };
 }
 
+let tripToken = 0;
+/** Fill the "somewhere else" pickers. Never throws: a failed load shows up in the planner. */
 async function renderTripPickers() {
+  const token = ++tripToken;
   const box = $("trip-pickers");
   box.hidden = state.where !== "trip";
   for (const b of $("where-buttons").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.where === state.where));
@@ -589,7 +601,14 @@ async function renderTripPickers() {
   setChildren(cSel, ...state.index.countries.map((c) => h("option", { value: c.id }, `${c.flag} ${c.name}`)));
   cSel.value = state.trip.country;
   const virus = virusesOf(state.trip.country)[0];
-  const data = await loadData(state.trip.country, virus);
+  let data;
+  try {
+    data = await loadData(state.trip.country, virus);
+  } catch {
+    if (token === tripToken) setChildren($("trip-area"));
+    return; // renderPlanner reports the failure for this place
+  }
+  if (token !== tripToken) return; // the choice changed while this loaded
   fillAreaSelect($("trip-area"), data.regions);
   if (!data.regions.some((r) => r.id === state.trip.region)) state.trip.region = virusMeta(state.trip.country, virus).default_region;
   $("trip-area").value = state.trip.region;
@@ -653,7 +672,9 @@ async function renderPlanner() {
   $("where-note").textContent =
     state.where === "trip" ? `Checking ${placeName}, ${countryMeta(place.country).name}.` : `Checking ${placeName}.`;
 
-  const weeksForButtons = byVirus[viruses[0]] ?? planWeeks(state.region, state.today, 4);
+  // A week can be picked if any ticked virus has a forecast for it.
+  const baseWeeks = byVirus[viruses[0]] ?? planWeeks(state.region, state.today, 4);
+  const weeksForButtons = baseWeeks.map((w, i) => ({ ...w, available: viruses.some((v) => byVirus[v][i]?.available) }));
   if (!weeksForButtons[state.when]?.available) state.when = Math.max(0, weeksForButtons.findIndex((w) => w.available));
   setChildren(
     $("when-buttons"),
@@ -708,7 +729,13 @@ async function renderPlanner() {
     h("ul", { class: "verdicts" }, rows),
     advice.strictest && advice.tips.length
       ? [
-          h("p", { class: "tips-for" }, viruses.length > 1 ? `Tips for ${own(state.virusLabels, advice.strictest.virus)}, the strictest of these:` : "Tips:"),
+          h(
+            "p",
+            { class: "tips-for" },
+            viruses.length > 1
+              ? `Tips for ${own(state.virusLabels, advice.strictest.virus)}, the strictest of ${viruses.every((v) => advice.results[v]) ? "these" : "those with a forecast"}:`
+              : "Tips:",
+          ),
           h("ul", { class: "tips" }, advice.tips.map((t) => h("li", {}, t))),
         ]
       : null,
@@ -963,29 +990,48 @@ async function init() {
     $("load-status").textContent = `Couldn't load the data (${err.message}). If you're running this locally, build it first with "python -m wastewater build" and serve the site folder.`;
     return;
   }
-  if (!state.index.countries?.length) {
+  if (!isValidIndex(state.index)) {
+    $("load-status").textContent =
+      "This data was made by a different version of Sewer Signal. Rebuild it with \"python -m wastewater build\", or wait for the next daily refresh.";
+    return;
+  }
+  if (!state.index.countries.length) {
     $("load-status").textContent = "The last data build produced no countries. Check the build log.";
     return;
   }
-  state.labels = Object.assign(Object.create(null), Object.fromEntries(state.index.categories.map((c) => [c.id, c.label])));
-  state.virusLabels = Object.assign(Object.create(null), Object.fromEntries(state.index.viruses.map((v) => [v.id, v.label])));
-  if (!own(state.virusLabels, state.virus)) state.virus = "covid";
-  if (!Array.isArray(state.planViruses)) state.planViruses = ["covid", "flu", "rsv"];
   try {
-    localStorage.removeItem("sewer-signal:vulnerable"); // saved by older versions
-  } catch {
-    /* storage unavailable */
-  }
-  renderActivities();
-  bindEvents();
-  const fromHash = readHash();
-  const country = countryMeta(fromHash.country) ? fromHash.country : store.get("country", state.index.default_country);
-  const region = fromHash.country === country ? fromHash.region : store.get(`region:${country}`, null);
-  try {
-    await show(countryMeta(country) ? country : state.index.default_country, region, fromHash.country === country ? fromHash.virus ?? "covid" : state.virus);
+    state.labels = Object.assign(Object.create(null), Object.fromEntries(state.index.categories.map((c) => [c.id, c.label])));
+    state.virusLabels = Object.assign(Object.create(null), Object.fromEntries(state.index.viruses.map((v) => [v.id, v.label])));
+    const virusIds = state.index.viruses.map((v) => v.id);
+    if (!own(state.virusLabels, state.virus)) state.virus = virusIds[0];
+    state.planViruses = Array.isArray(state.planViruses) ? virusIds.filter((v) => state.planViruses.includes(v)) : virusIds;
+    if (!(state.trip && typeof state.trip.country === "string")) state.trip = null;
+    try {
+      localStorage.removeItem("sewer-signal:vulnerable"); // saved by older versions
+    } catch {
+      /* storage unavailable */
+    }
+    renderActivities();
+    bindEvents();
+    const fromHash = readHash();
+    const country = countryMeta(fromHash.country) ? fromHash.country : store.get("country", state.index.default_country);
+    const region = fromHash.country === country ? fromHash.region : store.get(`region:${country}`, null);
+    await show(countryMeta(country) ? country : state.index.default_country, region, fromHash.country === country ? fromHash.virus ?? virusIds[0] : state.virus);
   } catch (err) {
     $("load-status").textContent = `Couldn't load the data (${err.message}).`;
   }
+}
+
+/** The shape this version of the page expects from index.json. */
+function isValidIndex(ix) {
+  return (
+    ix != null &&
+    Array.isArray(ix.countries) &&
+    Array.isArray(ix.categories) &&
+    Array.isArray(ix.viruses) &&
+    ix.viruses.length > 0 &&
+    ix.countries.every((c) => c && typeof c.id === "string" && c.viruses && typeof c.viruses === "object")
+  );
 }
 
 init();

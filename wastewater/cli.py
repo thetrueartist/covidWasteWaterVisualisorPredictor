@@ -7,7 +7,9 @@ import errno
 import functools
 import http.server
 import logging
+import logging.handlers
 import os
+import socket
 import sys
 import threading
 from contextlib import contextmanager
@@ -19,6 +21,9 @@ from .model import HOLDOUT_WEEKS
 from .sources import SOURCES
 
 SITE_DIR = Path(__file__).resolve().parent.parent / "site"
+serve_log = logging.getLogger("wastewater.serve")
+# The server's log is capped at this size, keeping one older file beside it.
+LOG_MAX_BYTES = 1_000_000
 
 
 @contextmanager
@@ -132,6 +137,29 @@ class SiteHandler(http.server.SimpleHTTPRequestHandler):
     server_version = "SewerSignal"
     sys_version = ""
     timeout = 15  # seconds a client may stay idle before it is disconnected
+    # Seconds to send the whole request line and headers. The idle timeout
+    # alone would let a client trickle one byte every few seconds forever.
+    header_deadline = 10
+
+    def handle_one_request(self):
+        self._deadline = threading.Timer(self.header_deadline, self._drop)
+        self._deadline.daemon = True
+        self._deadline.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self._deadline.cancel()
+
+    def parse_request(self):
+        ok = super().parse_request()  # reads the request line's headers too
+        self._deadline.cancel()  # they're in; from here the idle timeout covers the rest
+        return ok
+
+    def _drop(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def _inside_root(self, path: str) -> bool:
         root = os.path.realpath(self.directory)
@@ -141,8 +169,23 @@ class SiteHandler(http.server.SimpleHTTPRequestHandler):
             return False
         return not any(part.startswith(".") for part in Path(rel).parts if part != ".")
 
+    def _allowed(self) -> bool:
+        try:
+            path = self.translate_path(self.path)
+            if not self._inside_root(path):
+                return False
+            if os.path.isdir(path):
+                # A folder is served as its index.html, so check that file too.
+                for name in ("index.html", "index.htm"):
+                    index = os.path.join(path, name)
+                    if os.path.lexists(index) and not self._inside_root(index):
+                        return False
+            return True
+        except (ValueError, OSError):  # a NUL byte in the path, for example
+            return False
+
     def send_head(self):
-        if not self._inside_root(self.translate_path(self.path)):
+        if not self._allowed():
             self.send_error(404, "File not found")
             return None
         return super().send_head()
@@ -160,41 +203,89 @@ class SiteHandler(http.server.SimpleHTTPRequestHandler):
         if isinstance(code, int) and code >= 400:
             super().log_request(code, size)
 
+    def log_message(self, format, *args):
+        # One short line per entry, so junk requests can't flood the log.
+        message = " ".join((format % args).split())[:200]
+        serve_log.warning("%s [%s] %s", self.address_string(), self.log_date_time_string(), message)
+
 
 class SiteServer(http.server.ThreadingHTTPServer):
-    """Thread-per-connection server with a cap on simultaneous connections."""
+    """Thread-per-connection server with caps on simultaneous connections.
+
+    One client can hold at most ``max_per_client`` of the ``max_connections``
+    slots, so a single misbehaving device can't lock everyone else out.
+    """
 
     max_connections = 64
+    max_per_client = 16  # browsers open about 6 per site
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._slots = threading.BoundedSemaphore(self.max_connections)
+        self._lock = threading.Lock()
+        self._open = 0
+        self._per_client: dict[str, int] = {}
+
+    def _take(self, client: str) -> bool:
+        with self._lock:
+            if self._open >= self.max_connections or self._per_client.get(client, 0) >= self.max_per_client:
+                return False
+            self._open += 1
+            self._per_client[client] = self._per_client.get(client, 0) + 1
+            return True
+
+    def _give_back(self, client: str) -> None:
+        with self._lock:
+            self._open -= 1
+            left = self._per_client.get(client, 1) - 1
+            if left:
+                self._per_client[client] = left
+            else:
+                self._per_client.pop(client, None)
 
     def process_request(self, request, client_address):
-        if not self._slots.acquire(blocking=False):
+        client = client_address[0]
+        if not self._take(client):
             self.shutdown_request(request)  # full: drop the connection rather than queue it
             return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._give_back(client)
             raise
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            self._give_back(client_address[0])
+
+    def handle_error(self, request, client_address):
+        # One line, not a full traceback per bad request.
+        serve_log.error("%s: error handling a request (%s)", client_address[0], type(sys.exc_info()[1]).__name__)
 
 
 # Kept for anything importing the old name.
 QuietHandler = SiteHandler
 
 
+def _serve_logging(log_file: str | None) -> None:
+    if log_file:
+        handler: logging.Handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=LOG_MAX_BYTES, backupCount=1, encoding="utf-8"
+        )
+    else:
+        handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    serve_log.handlers[:] = [handler]
+    serve_log.setLevel(logging.INFO)
+    serve_log.propagate = False
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
+    _serve_logging(args.log_file)
     directory = Path(args.dir).resolve()
     if not (directory / "data" / "index.json").exists():
-        print(f"No data in {directory / 'data'} yet - run `python -m wastewater build` first.", file=sys.stderr)
+        serve_log.warning("No data in %s yet - run `python -m wastewater build` first.", directory / "data")
     handler = functools.partial(SiteHandler, directory=str(directory))
     try:
         server = SiteServer((args.host, args.port), handler)
@@ -204,11 +295,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
             if exc.errno == errno.EADDRINUSE
             else "Check the address and that you have permission to use it."
         )
-        print(f"Couldn't listen on {args.host}:{args.port} ({exc.strerror}). {hint}", file=sys.stderr)
+        serve_log.error("Couldn't listen on %s:%s (%s). %s", args.host, args.port, exc.strerror, hint)
         return 1
     shown = "localhost" if args.host in ("127.0.0.1", "0.0.0.0", "::") else args.host
     lan = " and to other devices on your network" if args.host in ("0.0.0.0", "::") else ""
-    print(f"Serving {directory} at http://{shown}:{args.port}/{lan} (Ctrl+C to stop)", flush=True)
+    serve_log.info("Serving %s at http://%s:%s/%s (Ctrl+C to stop)", directory, shown, args.port, lan)
     with server:
         try:
             server.serve_forever()
@@ -244,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--dir", default=str(SITE_DIR))
+    s.add_argument("--log-file", help="write the log here, capped at about 1 MB plus one older file")
     s.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)

@@ -17,14 +17,13 @@ week for each health board.
 
 from __future__ import annotations
 
-import io
 import logging
 from urllib.parse import urlsplit
 
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids
+from .base import RawSeries, Signal, Source, SourceInfo, read_csv, slugify, unique_ids
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +53,7 @@ def _date(col: pd.Series) -> pd.Series:
 
 
 def parse_national(text: str) -> list[RawSeries]:
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, ["WastewaterRNA", "SevenDayEnding"])
     values = pd.Series(
         pd.to_numeric(df["WastewaterRNA"], errors="coerce").to_numpy(),
         index=_date(df["SevenDayEnding"]),
@@ -72,7 +71,7 @@ def parse_weekly(
     code_col: str | None = None,
     tidy_name=lambda s: s,
 ) -> list[RawSeries]:
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, ["WeekEnding", VALUE_COL, name_col, code_col])
     df["date"] = _date(df["WeekEnding"])
     df["value"] = pd.to_numeric(df[VALUE_COL], errors="coerce")
     df = df.dropna(subset=["date", "value"])
@@ -94,7 +93,7 @@ def parse_weekly(
 
 def parse_positivity(text: str) -> list[RawSeries]:
     """National weekly test positivity (%) for flu and RSV."""
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, ["WeekEnding", "PositivityPercentage", "Pathogen"])
     df["date"] = _date(df["WeekEnding"])
     df["value"] = pd.to_numeric(df["PositivityPercentage"], errors="coerce")
     df = df.dropna(subset=["date", "value"])
@@ -114,7 +113,7 @@ def parse_positivity(text: str) -> list[RawSeries]:
 
 def parse_cases_by_board(text: str) -> list[RawSeries]:
     """Weekly confirmed flu and RSV cases per 100,000 people, per health board."""
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, ["HBcode", "HBName", "WeekEnding", "RateCasesPerWeek", "Pathogen", "Population"])
     df = df[df["HBcode"] != SCOTLAND_CODE]
     df["date"] = _date(df["WeekEnding"])
     df["value"] = pd.to_numeric(df["RateCasesPerWeek"], errors="coerce")
@@ -188,7 +187,13 @@ class Scotland(Source):
             log.warning("could not resolve PHS resource URLs (%s); using datastore dumps", exc)
         return {k: _phs_url(urls.get(rid)) or DATASTORE_DUMP.format(rid) for k, rid in RESOURCES.items()}
 
+    def parts(self):
+        return [(("covid",), self.fetch_wastewater), (("flu", "rsv"), self.fetch_lab_tests)]
+
     def fetch(self, fetcher: Fetcher) -> list[RawSeries]:
+        return self.fetch_wastewater(fetcher) + self.fetch_lab_tests(fetcher)
+
+    def fetch_wastewater(self, fetcher: Fetcher) -> list[RawSeries]:
         urls = self._resource_urls(fetcher)
         series = parse_national(fetcher.get_text(urls["national"]))
         series += parse_weekly(
@@ -214,6 +219,10 @@ class Scotland(Source):
             id_prefix="wwtw",
             name_col="WastewaterTreatmentWork",
         )
-        series += parse_positivity(fetcher.get_text(urls["positivity"]))
+        return series
+
+    def fetch_lab_tests(self, fetcher: Fetcher) -> list[RawSeries]:
+        urls = self._resource_urls(fetcher)
+        series = parse_positivity(fetcher.get_text(urls["positivity"]))
         series += parse_cases_by_board(fetcher.get_text(urls["cases_by_board"]))
         return series

@@ -189,3 +189,77 @@ def test_only_one_build_at_a_time(tmp_path):
             assert first and not second
     with only_one_build(tmp_path) as again:
         assert again
+
+
+class HugeDuplicates(Source):
+    """Two huge readings for the same week would average to infinity if checked too early."""
+
+    info = SourceInfo(
+        id="huge", name="Huge", flag="", hemisphere="N", publisher="", url="", license="",
+        signals={"covid": Signal("Test metric", "gc/L"), "rsv": Signal("RSV", "gc/L")},
+    )
+
+    def fetch(self, fetcher):
+        rsv = wave_series(seed=21).astype(float)
+        week = rsv.index[-10]
+        bad = pd.concat([rsv, pd.Series([1e308, 1e308], index=[week, week])])
+        return [
+            RawSeries("huge", "Huge", "national", "Huge", wave_series(seed=20)),
+            RawSeries("huge", "Huge", "national", "Huge", bad, pathogen="rsv"),
+            RawSeries("tiny", "Tiny", "region", "Regions", pd.Series(1e-320, index=rsv.index), pathogen="rsv"),
+        ]
+
+
+def test_huge_or_tiny_values_cannot_break_models_or_json(tmp_path):
+    index = build(out_dir=tmp_path, sources=[make_source("alpha", "N"), HugeDuplicates()], holdout_weeks=30, max_iter=15)
+    assert set(index["models"]) == {"covid", "rsv"}  # neither model was knocked out
+    assert index["errors"] == []
+    for f in tmp_path.glob("*.json"):
+        json.loads(f.read_text(), parse_constant=lambda c: pytest.fail(f"{f.name} contains {c}"))
+
+
+class DuplicateIds(Source):
+    info = SourceInfo(
+        id="dupes", name="Dupes", flag="", hemisphere="N", publisher="", url="", license="",
+        signals={"covid": Signal("Test metric", "gc/L")},
+    )
+
+    def fetch(self, fetcher):
+        return [
+            RawSeries("dupes", "Dupes", "national", "Dupes", wave_series(seed=30)),
+            RawSeries("a", "A", "region", "Regions", wave_series(seed=31, scale=10)),
+            RawSeries("a", "A again", "region", "Regions", wave_series(seed=32, scale=1000)),
+            RawSeries("a-2", "A two", "region", "Regions", wave_series(seed=33, scale=100000)),
+        ]
+
+
+def test_duplicate_ids_get_unique_ids_and_their_own_forecasts(tmp_path):
+    build(out_dir=tmp_path, sources=[make_source("alpha", "N"), DuplicateIds()], holdout_weeks=30, max_iter=15)
+    regions = {r["id"]: r for r in json.loads((tmp_path / "dupes-covid.json").read_text())["regions"]}
+    assert set(regions) == {"dupes", "a", "a-2", "a-2-2"}
+    for r in regions.values():  # each forecast sits on its own series' scale
+        last = [v for v in r["smooth"] if v is not None][-1]
+        assert r["forecast"][0]["q"][2] == pytest.approx(last, rel=3)
+
+
+class OneVirusBroken(Source):
+    info = SourceInfo(
+        id="split", name="Split", flag="", hemisphere="N", publisher="", url="", license="",
+        signals={"covid": Signal("Test metric", "gc/L"), "flu": Signal("Flu", "%", kind="lab tests")},
+    )
+
+    def parts(self):
+        def flu(fetcher):
+            raise KeyError("PositivityPercentage")  # the lab file changed format
+
+        return [(("covid",), self.fetch), (("flu",), flu)]
+
+    def fetch(self, fetcher):
+        return [RawSeries("split", "Split", "national", "Split", wave_series(seed=40))]
+
+
+def test_one_broken_virus_file_leaves_the_other_viruses(tmp_path):
+    index = build(out_dir=tmp_path, sources=[make_source("alpha", "N"), OneVirusBroken()], holdout_weeks=30, max_iter=15)
+    split = next(c for c in index["countries"] if c["id"] == "split")
+    assert set(split["viruses"]) == {"covid"}
+    assert index["errors"] == [{"country": "split", "virus": "flu", "error": "couldn't load the data (KeyError)"}]

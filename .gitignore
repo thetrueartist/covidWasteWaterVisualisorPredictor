@@ -14,3 +14,4 @@ node_modules/
 .server.pid
 .server.log
 .refresh.log
+.server.log.1

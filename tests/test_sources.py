@@ -234,3 +234,21 @@ def test_raw_series_drops_implausible_values_and_dates():
     assert raw.population is None
     assert RawSeries("y", "Y", "site", "S", pd.Series([1.0], index=idx[1:2]), population="1200").population == 1200.0
     assert RawSeries("z", "Z", "site", "S", pd.Series([1.0], index=idx[1:2]), population=float("inf")).population is None
+
+
+def test_clean_text_drops_every_invisible_or_bidi_character():
+    from wastewater.build import clean_text
+
+    hidden = "؜‎‮⁦  ￹\U000e0041\x00\x1b"
+    assert clean_text(f"Plant{hidden} 12") == "Plant 12"
+    assert clean_text("  Tāmaki   Makaurau ") == "Tāmaki Makaurau"
+    assert len(clean_text("x" * 500)) == 120
+
+
+def test_read_csv_ignores_extra_columns():
+    from wastewater.sources.base import read_csv
+
+    header = ",".join(["a", "b"] + [f"junk{i}" for i in range(2000)])
+    row = ",".join(["1", "2"] + ["x" * 10] * 2000)
+    df = read_csv(f"{header}\n{row}\n", ["a", "b"])
+    assert list(df.columns) == ["a", "b"]

@@ -14,8 +14,8 @@ import json
 import logging
 import math
 import os
-import re
 import time
+import unicodedata
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +29,7 @@ from .model import HOLDOUT_WEEKS, HORIZONS, MODEL_SPECS, QUANTILES, Dataset, eva
 from .preprocess import WINDOW_WEEKS, Prepared, percentile_rank, prepare
 from .risk import CATEGORIES, category, category_probabilities, quantile_cdf, trend
 from .sources import DEFAULT_COUNTRY, LEVELS, PATHOGENS, SOURCES, Source
+from .sources.base import unique_ids
 
 log = logging.getLogger(__name__)
 
@@ -50,18 +51,21 @@ def sig(x, digits: int = 4):
     return float(f"{x:.{digits}g}")
 
 
-# Invisible formatting characters (bidi overrides, zero-width) that upstream
-# names could use to make text display differently from what it says.
-_INVISIBLE = re.compile("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+# Unicode categories of characters that don't display as themselves: controls,
+# formatting (bidi marks and overrides, zero-width), line/paragraph separators,
+# private use and surrogates. Upstream names could use them to make text
+# display differently from what it says.
+_HIDDEN_CATEGORIES = {"Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"}
 MAX_TEXT = 120
 
 
 def clean_text(value):
-    """Upstream names as plain, bounded text: no control or bidi characters."""
+    """Upstream names as plain, bounded text: no control, bidi or invisible characters."""
     if value is None:
         return None
-    text = _INVISIBLE.sub("", str(value)).strip()
-    return text[:MAX_TEXT]
+    text = unicodedata.normalize("NFC", str(value))
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in _HIDDEN_CATEGORIES)
+    return " ".join(text.split())[:MAX_TEXT]
 
 
 def iso(ts) -> str:
@@ -74,9 +78,10 @@ def _failure(exc: Exception) -> str:
     return f"couldn't load the data ({type(exc).__name__})"
 
 
-def _load(src: Source, fetcher: Fetcher) -> list[Prepared]:
+def _load(src: Source, fetch, fetcher: Fetcher) -> list[Prepared]:
     out: list[Prepared] = []
-    for raw in src.fetch(fetcher):
+    # Ids must be unique per virus within a country, whatever the parser did.
+    for raw in unique_ids(fetch(fetcher)):
         signal = src.info.signals.get(raw.pathogen)
         if signal is None:
             continue
@@ -92,29 +97,41 @@ def _load(src: Source, fetcher: Fetcher) -> list[Prepared]:
     return out
 
 
+def _load_with_fallback(src: Source, fetch, fetcher: Fetcher) -> list[Prepared]:
+    try:
+        with fetcher.transaction() as tx:
+            return _load(src, fetch, fetcher)
+    except Exception:
+        if not tx.restored:
+            raise
+        # Fresh downloads didn't parse (a maintenance page served as data,
+        # say), so use the copies from the last good build.
+        log.exception("%s: new data didn't load; using the last good copy", src.info.id)
+        with fetcher.cache_only():
+            return _load(src, fetch, fetcher)
+
+
 def collect(sources: list[Source], fetcher: Fetcher) -> tuple[list[Prepared], list[dict]]:
     prepared: list[Prepared] = []
     errors: list[dict] = []
     for src in sources:
         started = time.time()
-        try:  # one broken portal should not take the site down
-            try:
-                with fetcher.transaction() as tx:
-                    got = _load(src, fetcher)
-            except Exception:
-                if not tx.restored:
-                    raise
-                # Fresh downloads didn't parse (a maintenance page served
-                # as data, say), so use the copies from the last good build.
-                log.exception("%s: new data didn't load; using the last good copy", src.info.id)
-                with fetcher.cache_only():
-                    got = _load(src, fetcher)
-        except Exception as exc:
-            log.exception("failed to load %s", src.info.id)
-            errors.append({"country": src.info.id, "error": _failure(exc)})
-            continue
-        prepared.extend(got)
-        log.info("%s: %d series in %.1fs", src.info.id, len(got), time.time() - started)
+        parts = src.parts()
+        n = 0
+        for viruses, fetch in parts:
+            try:  # one broken portal, or one broken file, should not take the site down
+                got = _load_with_fallback(src, fetch, fetcher)
+            except Exception as exc:
+                log.exception("failed to load %s (%s)", src.info.id, ", ".join(viruses))
+                if len(parts) == 1:
+                    errors.append({"country": src.info.id, "error": _failure(exc)})
+                else:
+                    errors.extend({"country": src.info.id, "virus": v, "error": _failure(exc)} for v in viruses)
+                continue
+            prepared.extend(got)
+            n += len(got)
+        if n:
+            log.info("%s: %d series in %.1fs", src.info.id, n, time.time() - started)
     return prepared, errors
 
 
@@ -191,10 +208,24 @@ def summarise(regions: list[dict]) -> dict:
     return counts
 
 
+def _finite(obj):
+    """NaN and infinity become null: browsers can't parse them in JSON."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return _finite(obj.item())
+    return obj
+
+
 def write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(_finite(payload), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")  # hidden, and unique per build
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
 
 
@@ -264,6 +295,8 @@ def build(
 
             try:  # a problem in one country's data shouldn't stop the others
                 rows = frame.loc[[(p.key, p.last_date) for p in active]].reset_index()
+                if len(rows) != len(active) or list(rows["key"]) != [p.key for p in active]:
+                    raise ValueError("feature rows don't line up with the areas")
                 has_features = rows["d1"].notna().to_numpy()
                 preds = np.full((len(rows), len(HORIZONS), len(QUANTILES)), np.nan)
                 if has_features.any():

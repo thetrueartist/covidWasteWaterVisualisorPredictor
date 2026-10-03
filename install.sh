@@ -33,6 +33,8 @@ ASSUME_YES=0
 SKIP_BUILD=0
 NO_START=0
 COUNTRIES=""
+COUNTRIES_SET=0
+UNPINNED=0
 
 # ---------- output ----------
 if [ -t 1 ]; then
@@ -66,10 +68,13 @@ Options:
   --lan               listen on all interfaces so other devices on your network can open it
   --service           run in the background and refresh the data daily (systemd user units,
                       or cron if systemd isn't available)
-  --countries LIST    only build some countries, e.g. scotland,usa (faster, less memory)
+  --countries LIST    only build some countries, e.g. scotland,usa (faster, less memory);
+                      remembered for later runs, and "all" goes back to every country
   --branch NAME       git branch to check out when cloning
   --no-build          skip the data download/model build
   --no-start          don't start the site at the end
+  --unpinned          if the exact, hash-checked package versions can't be installed,
+                      allow the newest compatible ones instead (not checked against hashes)
   -y, --yes           don't ask questions (installs missing packages with sudo if needed)
   -h, --help          show this help
 EOF
@@ -83,10 +88,11 @@ while [ $# -gt 0 ]; do
     --port) PORT="${2:?--port needs a number}"; PORT_SET=1; shift ;;
     --lan) HOST="0.0.0.0" ;;
     --service) WANT_SERVICE=1 ;;
-    --countries) COUNTRIES="${2:?--countries needs a list}"; shift ;;
+    --countries) COUNTRIES="${2:?--countries needs a list}"; COUNTRIES_SET=1; shift ;;
     --branch) BRANCH="${2:?--branch needs a name}"; shift ;;
     --no-build) SKIP_BUILD=1 ;;
     --no-start) NO_START=1 ;;
+    --unpinned) UNPINNED=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -95,20 +101,22 @@ while [ $# -gt 0 ]; do
 done
 # Strict input checks: these values end up in cron lines and systemd units.
 KNOWN_COUNTRIES="scotland usa canada germany netherlands new-zealand"
-if ! [[ "$PORT" =~ ^[1-9][0-9]{3,4}$ ]] || [ "$PORT" -gt 65535 ]; then
-  die "--port must be a number from 1024 to 65535"
-fi
-if [ -n "$COUNTRIES" ]; then
-  [[ "$COUNTRIES" =~ ^[a-z-]+(,[a-z-]+)*$ ]] || die "--countries must look like scotland,usa"
-  IFS=',' read -r -a _wanted <<< "$COUNTRIES"
-  for _c in "${_wanted[@]}"; do
-    [[ " $KNOWN_COUNTRIES " == *" $_c "* ]] || die "unknown country '$_c' (choose from: $KNOWN_COUNTRIES)"
-  done
-fi
+valid_port() { [[ "$1" =~ ^[1-9][0-9]{3,4}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]; }
+valid_countries() { # empty, or a comma list of known countries
+  [ -z "$1" ] && return 0
+  [[ "$1" =~ ^[a-z-]+(,[a-z-]+)*$ ]] || return 1
+  local c list
+  IFS=',' read -r -a list <<< "$1"
+  for c in "${list[@]}"; do [[ " $KNOWN_COUNTRIES " == *" $c "* ]] || return 1; done
+}
+valid_port "$PORT" || die "--port must be a number from 1024 to 65535"
+[ "$COUNTRIES" = all ] && COUNTRIES=""
+valid_countries "$COUNTRIES" || die "--countries must be a list like scotland,usa (choose from: $KNOWN_COUNTRIES)"
 if [ -n "$BRANCH" ] && ! [[ "$BRANCH" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]]; then
   die "--branch must be a plain git branch name"
 fi
 
+SELF="$(printf '%q' "$0")" # for copy-pasteable hints
 [ "$(uname -s)" = "Linux" ] || die "this script is for Linux. On macOS/Windows follow the manual steps in the README."
 
 # ---------- locate the app ----------
@@ -132,20 +140,25 @@ load_state() {
   # Only our own KEY=value lines; never source arbitrary content.
   [ -f "$STATE_FILE" ] || return 0
   local key value
-  while IFS='=' read -r key value; do
+  while IFS='=' read -r key value || [ -n "$key" ]; do
     case "$key" in
       SAVED_HOST) if [[ "$value" == "127.0.0.1" || "$value" == "0.0.0.0" ]]; then SAVED_HOST="$value"; fi ;;
-      SAVED_PORT) if [[ "$value" =~ ^[1-9][0-9]{3,4}$ ]] && [ "$value" -le 65535 ]; then SAVED_PORT="$value"; fi ;;
+      SAVED_PORT) if valid_port "$value"; then SAVED_PORT="$value"; fi ;;
       SAVED_MODE) if [[ "$value" =~ ^(manual|systemd|cron)$ ]]; then SAVED_MODE="$value"; fi ;;
+      SAVED_COUNTRIES) if valid_countries "$value"; then SAVED_COUNTRIES="$value"; fi ;;
+      SAVED_LINGER) if [ "$value" = 1 ]; then SAVED_LINGER=1; fi ;;
     esac
   done < "$STATE_FILE"
   return 0
 }
-save_state() {
+save_state() { # save_state mode
   safe_target "$STATE_FILE"
-  (umask 077; printf '%s\nSAVED_HOST=%s\nSAVED_PORT=%s\nSAVED_MODE=%s\n' "$MARKER" "$HOST" "$PORT" "$1" > "$STATE_FILE")
+  (umask 077; printf '%s\nSAVED_HOST=%s\nSAVED_PORT=%s\nSAVED_MODE=%s\nSAVED_COUNTRIES=%s\nSAVED_LINGER=%s\n' \
+    "$MARKER" "$HOST" "$PORT" "$1" "$COUNTRIES" "$SAVED_LINGER" > "$STATE_FILE")
 }
-SAVED_HOST=""; SAVED_PORT=""; SAVED_MODE=""
+SAVED_HOST=""; SAVED_PORT=""; SAVED_MODE=""; SAVED_COUNTRIES=""; SAVED_LINGER=0
+# A --countries choice sticks for later runs unless replaced.
+use_saved_countries() { if [ "$COUNTRIES_SET" = 0 ]; then COUNTRIES="$SAVED_COUNTRIES"; fi; }
 
 # ---------- checks ----------
 pkg_manager() {
@@ -242,18 +255,22 @@ setup_venv() {
     rm -rf -- "$VENV"
   fi
   [ -x "$PY" ] || python3 -m venv "$VENV"
-  "$PY" -m pip install --quiet --upgrade pip || warn "couldn't upgrade pip; carrying on with the bundled one"
-  # Prefer the exact, hash-checked versions CI tests with. If that fails (an
-  # unusual Python or platform with no matching wheels), fall back to the
-  # newest compatible releases. The app itself runs from $APP_DIR.
-  if [ -f "$APP_DIR/requirements.txt" ] \
-    && "$PY" -m pip install --quiet --require-hashes -r "$APP_DIR/requirements.txt"; then
-    ok "numpy, pandas, scikit-learn, requests (pinned versions)"
-  else
-    warn "the pinned versions didn't install; trying the latest compatible ones"
-    "$PY" -m pip install --quiet -e "$APP_DIR" \
+  local pip=("$PY" -m pip install --quiet --disable-pip-version-check)
+  # The exact versions CI tests with, each checked against its hash. The app
+  # itself runs from $APP_DIR, so nothing else gets installed.
+  if [ -f "$APP_DIR/requirements.txt" ] && "${pip[@]}" --require-hashes -r "$APP_DIR/requirements.txt"; then
+    ok "numpy, pandas, scikit-learn, requests (pinned and hash-checked)"
+  elif [ "$UNPINNED" = 1 ]; then
+    warn "the pinned versions didn't install; installing the newest compatible ones (--unpinned)"
+    "${pip[@]}" -e "$APP_DIR" \
       || die "pip couldn't install the Python packages (details above). Check your internet connection or proxy, then run this again."
-    ok "numpy, pandas, scikit-learn, requests"
+    ok "numpy, pandas, scikit-learn, requests (unpinned)"
+  else
+    die "pip couldn't install the pinned, hash-checked packages (details above).
+  Usually that's the network or a proxy: check it and run this again.
+  If pip says the hashes don't match, something altered the downloads; don't work around that.
+  If your Python or platform has no matching packages, you can run this again with --unpinned
+  to accept the newest compatible versions without hash checks."
   fi
 }
 
@@ -267,7 +284,7 @@ build_data() {
   elif [ -f "$APP_DIR/site/data/index.json" ]; then
     warn "the build failed; keeping the previous data"
   else
-    die "the data build failed. Check your internet connection and run: $0 update"
+    die "the data build failed. Check your internet connection and run: $SELF update"
   fi
 }
 
@@ -337,6 +354,14 @@ ExecStart=$PY -m wastewater serve --host $HOST --port $PORT
 Restart=on-failure
 NoNewPrivileges=true
 UMask=0077
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=512M
+TasksMax=256
 
 [Install]
 WantedBy=default.target"
@@ -352,7 +377,12 @@ WorkingDirectory=$APP_DIR
 ExecStart=$PY $build_args
 TimeoutStartSec=1h
 Nice=10
-NoNewPrivileges=true"
+NoNewPrivileges=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryMax=3G"
   write_unit "$APP-refresh.timer" "[Unit]
 Description=Daily Sewer Signal data refresh
 
@@ -369,6 +399,7 @@ WantedBy=timers.target"
   ok "systemd user service '$APP' running; data refreshes daily ($APP-refresh.timer)"
   if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q yes; then
     if loginctl enable-linger "$USER" >/dev/null 2>&1; then
+      SAVED_LINGER=1
       ok "enabled lingering so it keeps running after you log out"
     else
       info "To keep it running after you log out: sudo loginctl enable-linger $USER"
@@ -393,7 +424,7 @@ wait_until_up() { # wait_until_up port: poll for up to 15s
 server_pid() { # pid of our background server, if it's really ours
   [ -f "$PID_FILE" ] && [ ! -L "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE")"
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/cmdline" ] || return 1
   tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF "$PY -m wastewater serve" || return 1
   echo "$pid"
 }
@@ -417,12 +448,52 @@ has_our_cron() {
     END { exit !found }'
 }
 
+our_units_exist() {
+  local unit
+  for unit in "$APP.service" "$APP-refresh.timer" "$APP-refresh.service"; do
+    if [ -f "$UNIT_DIR/$unit" ] && ours "$UNIT_DIR/$unit"; then return 0; fi
+  done
+  return 1
+}
+
+# Our systemd units can only be stopped or replaced through systemctl --user.
+need_systemd_for_units() {
+  if our_units_exist && ! has_systemd_user; then
+    die "the background service runs under systemd, which this session can't reach (for example
+  after su or sudo -u). Run this again from a normal login or SSH session as $USER."
+  fi
+}
+
+remove_units() { # returns 1 if something had to be left in place
+  local unit left=0
+  for unit in "$APP.service" "$APP-refresh.timer" "$APP-refresh.service"; do
+    [ -e "$UNIT_DIR/$unit" ] || [ -L "$UNIT_DIR/$unit" ] || continue
+    if ours "$UNIT_DIR/$unit"; then
+      systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+      rm -f -- "$UNIT_DIR/$unit"
+      ok "removed $unit"
+    else
+      warn "$UNIT_DIR/$unit wasn't created by this script; left it alone"
+      left=1
+    fi
+  done
+  if has_systemd_user; then systemctl --user daemon-reload 2>/dev/null || true; fi
+  return "$left"
+}
+
+remove_cron() { # returns 1 if our lines couldn't be removed
+  command -v crontab >/dev/null 2>&1 && has_our_cron || return 0
+  cron_replace ""
+  if has_our_cron; then warn "couldn't remove the cron entries; check with: crontab -l"; return 1; fi
+  ok "removed cron entries"
+}
+
 start_background() {
   local pid
   if pid="$(server_pid)"; then stop_pid "$pid"; fi
   safe_target "$PID_FILE"
   safe_target "$LOG_FILE"
-  (cd "$APP_DIR" || exit 1; umask 077; nohup "$PY" -m wastewater serve --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
+  (cd "$APP_DIR" || exit 1; umask 077; nohup "$PY" -m wastewater serve --host "$HOST" --port "$PORT" --log-file "$LOG_FILE" >> "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
   if ! wait_until_up "$PORT" || ! server_pid >/dev/null; then die "the server didn't start; see $LOG_FILE"; fi
 }
 
@@ -430,9 +501,11 @@ install_cron() {
   command -v crontab >/dev/null 2>&1 || die "neither systemd user services nor cron are available. Start it yourself with: $(start_hint)"
   local build_args="-m wastewater build"
   [ -n "$COUNTRIES" ] && build_args+=" --countries $COUNTRIES"
+  safe_target "$APP_DIR/.refresh.log"
+  (umask 077; : >> "$APP_DIR/.refresh.log") # private, like the server log
   # Paths and arguments were validated to plain characters above, so these lines can't be bent.
   cron_replace "15 7 * * * cd $APP_DIR && timeout 3600 $PY $build_args >> $APP_DIR/.refresh.log 2>&1$CRON_TAG
-@reboot cd $APP_DIR || exit 1; umask 077; $PY -m wastewater serve --host $HOST --port $PORT >> $LOG_FILE 2>&1 & echo \$! > $PID_FILE$CRON_TAG"
+@reboot cd $APP_DIR || exit 1; umask 077; $PY -m wastewater serve --host $HOST --port $PORT --log-file $LOG_FILE >> $LOG_FILE 2>&1 & echo \$! > $PID_FILE$CRON_TAG"
   start_background
   ok "running in the background (pid $(server_pid)); cron refreshes data daily and restarts it after a reboot"
 }
@@ -461,10 +534,12 @@ show_url() {
 
 cmd_install() {
   load_state
-  # Re-running keeps the previous port and background mode unless told otherwise.
+  need_systemd_for_units
+  # Re-running keeps the previous port, countries and background mode unless told otherwise.
   if [ "$PORT_SET" = 0 ] && [ -n "$SAVED_PORT" ]; then PORT="$SAVED_PORT"; fi
+  use_saved_countries
   if [ "$WANT_SERVICE" = 0 ] && { [ "$SAVED_MODE" = systemd ] || [ "$SAVED_MODE" = cron ]; }; then
-    info "Keeping the existing background service (remove it with: $0 uninstall)"
+    info "Keeping the existing background service (remove it with: $SELF uninstall)"
     WANT_SERVICE=1
   fi
   check_requirements
@@ -477,14 +552,23 @@ cmd_install() {
   ok "$HOST:$PORT"
   if [ "$WANT_SERVICE" = 1 ]; then
     step "Setting up the background service"
-    if has_systemd_user; then install_systemd; save_state systemd; else warn "systemd user services aren't available here; using cron instead"; install_cron; save_state cron; fi
+    # Only one kind of background service at a time: switching removes the other.
+    if has_systemd_user; then
+      remove_cron || die "couldn't remove the old cron entries; remove them with crontab -e and run this again"
+      install_systemd
+      save_state systemd
+    else
+      warn "systemd user services aren't available here; using cron instead"
+      install_cron
+      save_state cron
+    fi
     show_url
-    info "Manage it with: $0 status | update | uninstall"
+    info "Manage it with: $SELF status | update | uninstall"
     return
   fi
   save_state manual
   show_url
-  info "Later: run ${B}$0 --service${RST} to keep it running and refresh data daily."
+  info "Later: run ${B}$SELF --service${RST} to keep it running and refresh data daily."
   if [ "$NO_START" = 1 ]; then
     info "Start it with: $(start_hint)"
     return
@@ -497,6 +581,8 @@ cmd_update() {
   is_app_dir "$APP_DIR" || die "no install found at $APP_DIR (use --dir)"
   load_state
   HOST="${SAVED_HOST:-$HOST}"; PORT="${SAVED_PORT:-$PORT}"
+  use_saved_countries
+  if [ "$SAVED_MODE" = systemd ]; then need_systemd_for_units; fi
   step "Updating the code"
   if [ -d "$APP_DIR/.git" ]; then
     if [ -n "$(git -C "$APP_DIR" status --porcelain --untracked-files=no)" ]; then
@@ -525,6 +611,7 @@ cmd_status() {
     printf '%sData%s      not built yet\n' "$B" "$RST"
   fi
   printf '%sMode%s      %s\n' "$B" "$RST" "${SAVED_MODE:-not installed}"
+  printf '%sCountries%s %s\n' "$B" "$RST" "$(if [ -n "$SAVED_COUNTRIES" ]; then printf '%s' "$SAVED_COUNTRIES"; else printf 'all'; fi)"
   if [ "$SAVED_MODE" = systemd ] && has_systemd_user; then
     printf '%sService%s   %s, refresh timer %s\n' "$B" "$RST" "$(systemctl --user is-active "$APP.service" 2>/dev/null || true)" "$(systemctl --user is-active "$APP-refresh.timer" 2>/dev/null || true)"
   elif [ "$SAVED_MODE" = cron ]; then
@@ -541,26 +628,15 @@ cmd_status() {
 
 cmd_uninstall() {
   load_state
+  need_systemd_for_units
   step "Removing the background service"
-  local systemd=0 leftover=0
-  has_systemd_user && systemd=1
-  for unit in "$APP.service" "$APP-refresh.timer" "$APP-refresh.service"; do
-    [ -e "$UNIT_DIR/$unit" ] || [ -L "$UNIT_DIR/$unit" ] || continue
-    if ours "$UNIT_DIR/$unit"; then
-      [ "$systemd" = 1 ] && systemctl --user disable --now "$unit" >/dev/null 2>&1
-      rm -f -- "$UNIT_DIR/$unit"
-      ok "removed $unit"
-    else
-      warn "$UNIT_DIR/$unit wasn't created by this script; left it alone"
-      leftover=1
-    fi
-  done
-  [ "$systemd" = 1 ] && systemctl --user daemon-reload 2>/dev/null
-  if command -v crontab >/dev/null 2>&1 && has_our_cron; then
-    cron_replace ""
-    if has_our_cron; then warn "couldn't remove the cron entries; check with: crontab -l"; leftover=1; else ok "removed cron entries"; fi
-  fi
+  local leftover=0
+  remove_units || leftover=1
+  remove_cron || leftover=1
   local pid; if pid="$(server_pid)"; then stop_pid "$pid"; ok "stopped server (pid $pid)"; fi
+  if [ "$SAVED_LINGER" = 1 ] && loginctl disable-linger "$USER" >/dev/null 2>&1; then
+    ok "turned off lingering, which the installer had turned on"
+  fi
   [ -L "$PID_FILE" ] || rm -f -- "$PID_FILE"
   if ours "$STATE_FILE" && [ -e "$STATE_FILE" ]; then rm -f -- "$STATE_FILE"; fi
   [ "$leftover" = 0 ] || warn "some pieces were left in place (see above)"

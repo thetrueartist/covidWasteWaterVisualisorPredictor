@@ -6,13 +6,12 @@ regional and per-site SARS-CoV-2 genome copies per person per day.
 
 from __future__ import annotations
 
-import io
 import re
 
 import pandas as pd
 
 from ..http import Fetcher
-from .base import RawSeries, Signal, Source, SourceInfo, slugify, unique_ids
+from .base import RawSeries, Signal, Source, SourceInfo, read_csv, slugify, unique_ids
 
 BASE = "https://raw.githubusercontent.com/ESR-NZ/covid_in_wastewater/main/data/"
 
@@ -46,8 +45,12 @@ def _site_name(code: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", rest or code)
 
 
+def _wanted(*names):
+    return lambda c: c in names or str(c).startswith("copies")
+
+
 def parse_national(text: str) -> RawSeries:
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, _wanted("week_end_date"))
     return RawSeries(
         "new-zealand", "New Zealand", "national", "New Zealand",
         pd.Series(df[_value_col(df)].to_numpy(), index=pd.to_datetime(df["week_end_date"], errors="coerce")),
@@ -55,7 +58,7 @@ def parse_national(text: str) -> RawSeries:
 
 
 def parse_regions(text: str) -> list[RawSeries]:
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, _wanted("week_end_date", "Region"))
     col = _value_col(df)
     return [
         RawSeries(
@@ -67,11 +70,11 @@ def parse_regions(text: str) -> list[RawSeries]:
 
 
 def parse_sites(text: str, sites_text: str | None = None) -> list[RawSeries]:
-    df = pd.read_csv(io.StringIO(text))
+    df = read_csv(text, _wanted("week_end_date", "SampleLocation"))
     col = _value_col(df)
     meta = {}
     if sites_text:
-        sites = pd.read_csv(io.StringIO(sites_text))
+        sites = read_csv(sites_text, ["SampleLocation", "Region", "DisplayName", "Population"])
         meta = sites.set_index("SampleLocation").to_dict("index")
     out = []
     for code, g in df.groupby("SampleLocation", sort=True):

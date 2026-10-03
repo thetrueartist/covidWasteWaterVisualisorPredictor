@@ -62,6 +62,7 @@ cd sewer-signal
 
 The installer is careful:
 - Everything goes into the folder and a Python virtualenv. Nothing is installed system-wide.
+- Python packages are the exact versions CI tests, each checked against its published hash.
 - It only uses `sudo` to add a missing package such as `python3-venv`, and it asks first.
 - It listens on `127.0.0.1` only. Add `--lan` to open it to your home network.
 - If port 8000 is busy, it takes the next free port. It never stops another program.
