@@ -178,10 +178,13 @@ class Scotland(Source):
         },
     )
 
-    def _resource_urls(self, fetcher: Fetcher) -> dict[str, str]:
+    def _resource_urls(self, fetcher: Fetcher, part: str) -> dict[str, str]:
+        # Download links change every week. Each part keeps its own copy of the
+        # index, so falling back to a part's last good files also brings back
+        # the links that point at them.
         urls: dict[str, str] = {}
         try:
-            pkg = fetcher.get_json(CKAN_API, params={"id": PACKAGE_ID})["result"]
+            pkg = fetcher.get_json(CKAN_API, params={"id": PACKAGE_ID}, tag=part)["result"]
             urls = {r["id"]: r["url"] for r in pkg["resources"]}
         except Exception as exc:  # fall back to the datastore dump endpoints
             log.warning("could not resolve PHS resource URLs (%s); using datastore dumps", exc)
@@ -194,7 +197,7 @@ class Scotland(Source):
         return self.fetch_wastewater(fetcher) + self.fetch_lab_tests(fetcher)
 
     def fetch_wastewater(self, fetcher: Fetcher) -> list[RawSeries]:
-        urls = self._resource_urls(fetcher)
+        urls = self._resource_urls(fetcher, "wastewater")
         series = parse_national(fetcher.get_text(urls["national"]))
         series += parse_weekly(
             fetcher.get_text(urls["health_board"]),
@@ -222,7 +225,7 @@ class Scotland(Source):
         return series
 
     def fetch_lab_tests(self, fetcher: Fetcher) -> list[RawSeries]:
-        urls = self._resource_urls(fetcher)
+        urls = self._resource_urls(fetcher, "lab-tests")
         series = parse_positivity(fetcher.get_text(urls["positivity"]))
         series += parse_cases_by_board(fetcher.get_text(urls["cases_by_board"]))
         return series

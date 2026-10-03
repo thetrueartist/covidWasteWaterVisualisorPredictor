@@ -245,10 +245,14 @@ def test_clean_text_drops_every_invisible_or_bidi_character():
     assert len(clean_text("x" * 500)) == 120
 
 
-def test_read_csv_ignores_extra_columns():
-    from wastewater.sources.base import read_csv
+def test_read_csv_ignores_extra_columns_and_refuses_absurd_headers():
+    from wastewater.sources.base import MAX_COLUMNS, read_csv
 
-    header = ",".join(["a", "b"] + [f"junk{i}" for i in range(2000)])
-    row = ",".join(["1", "2"] + ["x" * 10] * 2000)
-    df = read_csv(f"{header}\n{row}\n", ["a", "b"])
-    assert list(df.columns) == ["a", "b"]
+    header = ",".join(["a", "b"] + [f"junk{i}" for i in range(50)])
+    row = ",".join(["1", "2"] + ["x" * 10] * 50)
+    assert list(read_csv(f"{header}\n{row}\n", ["a", "b"]).columns) == ["a", "b"]
+    wide = ",".join(f"c{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(ValueError):
+        read_csv(f"{wide}\n", ["c0"])
+    with pytest.raises(ValueError):
+        read_csv("a,b,a\n1,2,3\n", ["a"])

@@ -71,14 +71,16 @@ class Fetcher:
         self._backups: dict[Path, Path | None] | None = None
         self._cache_only = False
 
-    def _cache_path(self, url: str, params: Mapping[str, Any] | None) -> Path:
+    def _cache_path(self, url: str, params: Mapping[str, Any] | None, tag: str | None = None) -> Path:
         key = url
         if params:
             key += "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
+        if tag:  # a separate cached copy of the same URL, e.g. one per source part
+            key += "#" + tag
         return self.cache_dir / hashlib.sha256(key.encode()).hexdigest()[:32]
 
-    def get_bytes(self, url: str, params: Mapping[str, Any] | None = None) -> bytes:
-        path = self._cache_path(url, params)
+    def get_bytes(self, url: str, params: Mapping[str, Any] | None = None, tag: str | None = None) -> bytes:
+        path = self._cache_path(url, params, tag)
         if path.exists():
             age = time.time() - path.stat().st_mtime
             # A modification time in the future isn't trusted as fresh.
@@ -189,11 +191,11 @@ class Fetcher:
                 return b"".join(chunks)
         raise ValueError(f"too many redirects fetching {url}")
 
-    def get_text(self, url: str, params: Mapping[str, Any] | None = None) -> str:
-        return self.get_bytes(url, params).decode("utf-8-sig")
+    def get_text(self, url: str, params: Mapping[str, Any] | None = None, tag: str | None = None) -> str:
+        return self.get_bytes(url, params, tag).decode("utf-8-sig")
 
-    def get_json(self, url: str, params: Mapping[str, Any] | None = None) -> Any:
-        return json.loads(self.get_bytes(url, params))
+    def get_json(self, url: str, params: Mapping[str, Any] | None = None, tag: str | None = None) -> Any:
+        return json.loads(self.get_bytes(url, params, tag))
 
 
 class Transaction:

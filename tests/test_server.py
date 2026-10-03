@@ -196,3 +196,54 @@ def test_log_file_is_capped(tmp_path, monkeypatch):
         for h in cli.serve_log.handlers:
             h.close()
         cli._serve_logging(None)
+
+
+def test_slow_connections_from_many_addresses_make_room_for_new_ones(tmp_path):
+    site = tmp_path / "s"
+    site.mkdir()
+    (site / "index.html").write_text("ok")
+
+    class Small(SiteServer):
+        max_connections = 4
+        max_per_client = 2
+
+    srv = Small(("127.0.0.1", 0), functools.partial(SiteHandler, directory=str(site)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        slow = []
+        for src in ("127.0.0.2", "127.0.0.3"):  # two addresses, each at its own cap
+            for _ in range(2):
+                s = socket.create_connection(srv.server_address, source_address=(src, 0))
+                s.sendall(b"GET /index.html HTTP/1.1\r\n")  # and never finish the request
+                slow.append(s)
+        time.sleep(1.3)
+        conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5,
+                                          source_address=("127.0.0.4", 0))
+        conn.request("GET", "/index.html")
+        resp = conn.getresponse()
+        assert resp.status == 200 and resp.read() == b"ok"
+        conn.close()
+        for s in slow:
+            s.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_control_characters_are_escaped_in_the_log(server, caplog):
+    import logging
+
+    from wastewater import cli
+
+    cli.serve_log.propagate = True
+    try:
+        with caplog.at_level(logging.WARNING, logger="wastewater.serve"):
+            sock = socket.create_connection(server.server_address, timeout=5)
+            sock.sendall(b"GET /\x1b[2J\x07nope HTTP/1.0\r\n\r\n")
+            sock.recv(4096)
+            sock.close()
+            time.sleep(0.2)
+        logged = "\n".join(r.getMessage() for r in caplog.records)
+        assert "\\x1b[2J\\x07nope" in logged and "\x1b" not in logged
+    finally:
+        cli.serve_log.propagate = False

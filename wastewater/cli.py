@@ -12,6 +12,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -125,6 +126,9 @@ SECURITY_HEADERS = {
 }
 
 
+_CONTROL_ESCAPES = {c: f"\\x{c:02x}" for c in (*range(0x20), *range(0x7F, 0xA0))}
+
+
 class SiteHandler(http.server.SimpleHTTPRequestHandler):
     """Serves the static site folder and nothing else.
 
@@ -145,14 +149,22 @@ class SiteHandler(http.server.SimpleHTTPRequestHandler):
         self._deadline = threading.Timer(self.header_deadline, self._drop)
         self._deadline.daemon = True
         self._deadline.start()
+        waiting = getattr(self.server, "waiting", None)
+        if waiting is not None:
+            waiting.add(self.connection)
         try:
             super().handle_one_request()
         finally:
             self._deadline.cancel()
+            if waiting is not None:
+                waiting.discard(self.connection)
 
     def parse_request(self):
         ok = super().parse_request()  # reads the request line's headers too
         self._deadline.cancel()  # they're in; from here the idle timeout covers the rest
+        waiting = getattr(self.server, "waiting", None)
+        if waiting is not None:
+            waiting.discard(self.connection)
         return ok
 
     def _drop(self):
@@ -204,16 +216,51 @@ class SiteHandler(http.server.SimpleHTTPRequestHandler):
             super().log_request(code, size)
 
     def log_message(self, format, *args):
-        # One short line per entry, so junk requests can't flood the log.
-        message = " ".join((format % args).split())[:200]
+        # One short line per entry, with control characters shown as \xNN so a
+        # client can't send terminal escape codes into the log.
+        message = (format % args).translate(_CONTROL_ESCAPES)[:200]
         serve_log.warning("%s [%s] %s", self.address_string(), self.log_date_time_string(), message)
+
+
+class _Waiting:
+    """Connections that haven't finished sending a request yet, with when they started."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._since: dict = {}
+
+    def add(self, sock) -> None:
+        with self._lock:
+            self._since[sock] = time.monotonic()
+
+    def discard(self, sock) -> None:
+        with self._lock:
+            self._since.pop(sock, None)
+
+    def drop_oldest(self, min_age: float) -> bool:
+        """Disconnect whoever has been slowest to send a request, if anyone is that slow."""
+        with self._lock:
+            if not self._since:
+                return False
+            sock, since = min(self._since.items(), key=lambda item: item[1])
+            if time.monotonic() - since < min_age:
+                return False
+            del self._since[sock]
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        return True
 
 
 class SiteServer(http.server.ThreadingHTTPServer):
     """Thread-per-connection server with caps on simultaneous connections.
 
-    One client can hold at most ``max_per_client`` of the ``max_connections``
-    slots, so a single misbehaving device can't lock everyone else out.
+    One client address can hold at most ``max_per_client`` of the
+    ``max_connections`` slots. When every slot is busy, a newcomer still gets
+    in if some connection has spent over a second without sending a full
+    request: the slowest such connection is dropped to make room. So trickling
+    bytes, even from several addresses, can't lock everyone else out.
     """
 
     max_connections = 64
@@ -224,11 +271,17 @@ class SiteServer(http.server.ThreadingHTTPServer):
         self._lock = threading.Lock()
         self._open = 0
         self._per_client: dict[str, int] = {}
+        self.waiting = _Waiting()
 
     def _take(self, client: str) -> bool:
         with self._lock:
-            if self._open >= self.max_connections or self._per_client.get(client, 0) >= self.max_per_client:
+            if self._per_client.get(client, 0) >= self.max_per_client:
                 return False
+            if self._open >= self.max_connections:
+                # Dropped connections take a moment to wind down, so allow a
+                # little overlap, but never more than double the cap.
+                if self._open >= 2 * self.max_connections or not self.waiting.drop_oldest(min_age=1.0):
+                    return False
             self._open += 1
             self._per_client[client] = self._per_client.get(client, 0) + 1
             return True

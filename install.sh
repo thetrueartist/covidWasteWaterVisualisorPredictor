@@ -135,6 +135,7 @@ PY="$VENV/bin/python"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 PID_FILE="$APP_DIR/.server.pid"
 LOG_FILE="$APP_DIR/.server.log"
+ERR_FILE="$APP_DIR/.server.err" # startup errors; the log itself is capped by the server
 
 load_state() {
   # Only our own KEY=value lines; never source arbitrary content.
@@ -493,8 +494,9 @@ start_background() {
   if pid="$(server_pid)"; then stop_pid "$pid"; fi
   safe_target "$PID_FILE"
   safe_target "$LOG_FILE"
-  (cd "$APP_DIR" || exit 1; umask 077; nohup "$PY" -m wastewater serve --host "$HOST" --port "$PORT" --log-file "$LOG_FILE" >> "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
-  if ! wait_until_up "$PORT" || ! server_pid >/dev/null; then die "the server didn't start; see $LOG_FILE"; fi
+  safe_target "$ERR_FILE"
+  (cd "$APP_DIR" || exit 1; umask 077; nohup "$PY" -m wastewater serve --host "$HOST" --port "$PORT" --log-file "$LOG_FILE" > /dev/null 2> "$ERR_FILE" & echo $! > "$PID_FILE")
+  if ! wait_until_up "$PORT" || ! server_pid >/dev/null; then die "the server didn't start; see $LOG_FILE and $ERR_FILE"; fi
 }
 
 install_cron() {
@@ -505,7 +507,7 @@ install_cron() {
   (umask 077; : >> "$APP_DIR/.refresh.log") # private, like the server log
   # Paths and arguments were validated to plain characters above, so these lines can't be bent.
   cron_replace "15 7 * * * cd $APP_DIR && timeout 3600 $PY $build_args >> $APP_DIR/.refresh.log 2>&1$CRON_TAG
-@reboot cd $APP_DIR || exit 1; umask 077; $PY -m wastewater serve --host $HOST --port $PORT --log-file $LOG_FILE >> $LOG_FILE 2>&1 & echo \$! > $PID_FILE$CRON_TAG"
+@reboot cd $APP_DIR || exit 1; umask 077; $PY -m wastewater serve --host $HOST --port $PORT --log-file $LOG_FILE > /dev/null 2> $ERR_FILE & echo \$! > $PID_FILE$CRON_TAG"
   start_background
   ok "running in the background (pid $(server_pid)); cron refreshes data daily and restarts it after a reboot"
 }
@@ -579,6 +581,8 @@ cmd_install() {
 
 cmd_update() {
   is_app_dir "$APP_DIR" || die "no install found at $APP_DIR (use --dir)"
+  # The daily refresh is set up with the saved countries, so changing them is an install.
+  [ "$COUNTRIES_SET" = 0 ] || die "to change which countries are built, run: $SELF --countries LIST (or all)"
   load_state
   HOST="${SAVED_HOST:-$HOST}"; PORT="${SAVED_PORT:-$PORT}"
   use_saved_countries

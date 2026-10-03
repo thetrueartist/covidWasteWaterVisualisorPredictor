@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 import math
 import re
@@ -118,12 +119,22 @@ class Source(ABC):
         return [(tuple(self.info.signals), self.fetch)]
 
 
+# Real files have about 25 columns at most.
+MAX_COLUMNS = 200
+
+
 def read_csv(text: str, columns, **kwargs) -> pd.DataFrame:
     """Parse CSV text, keeping only the columns a parser uses.
 
-    ``columns`` is a collection of names or a predicate. A file padded with
-    thousands of extra columns then can't blow up memory.
+    ``columns`` is a collection of names or a predicate. Files with a huge or
+    duplicated header are refused before pandas sees them, so a padded file
+    can't blow up memory or parsing time.
     """
+    header = next(csv.reader(io.StringIO(text.split("\n", 1)[0]), delimiter=kwargs.get("sep", ",")), [])
+    if len(header) > MAX_COLUMNS:
+        raise ValueError(f"{len(header)} columns; expected at most {MAX_COLUMNS}")
+    if len(set(header)) != len(header):
+        raise ValueError("duplicate column names")
     keep = columns if callable(columns) else (lambda c, wanted=frozenset(columns): c in wanted)
     return pd.read_csv(io.StringIO(text), usecols=keep, **kwargs)
 

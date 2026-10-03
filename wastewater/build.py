@@ -80,8 +80,11 @@ def _failure(exc: Exception) -> str:
 
 def _load(src: Source, fetch, fetcher: Fetcher) -> list[Prepared]:
     out: list[Prepared] = []
+    raws = fetch(fetcher)
+    for raw in raws:  # published ids are plain and short; shorten first so suffixes stay unique
+        raw.region_id = (clean_text(raw.region_id) or "area")[:100]
     # Ids must be unique per virus within a country, whatever the parser did.
-    for raw in unique_ids(fetch(fetcher)):
+    for raw in unique_ids(raws):
         signal = src.info.signals.get(raw.pathogen)
         if signal is None:
             continue

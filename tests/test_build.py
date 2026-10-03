@@ -263,3 +263,63 @@ def test_one_broken_virus_file_leaves_the_other_viruses(tmp_path):
     split = next(c for c in index["countries"] if c["id"] == "split")
     assert set(split["viruses"]) == {"covid"}
     assert index["errors"] == [{"country": "split", "virus": "flu", "error": "couldn't load the data (KeyError)"}]
+
+
+def test_scotland_falls_back_per_virus_when_download_links_change(tmp_path, monkeypatch):
+    """PHS renames its files every week. A broken new lab file must fall back to the
+    last good one, and the wastewater data must still update."""
+    from wastewater.build import collect
+    from wastewater.http import Fetcher
+    from wastewater.sources import scotland as sc
+
+    weeks = pd.date_range("2025-01-05", periods=30, freq="W-SUN")
+    ymd = [d.strftime("%Y%m%d") for d in weeks]
+    files = {
+        "national": "SevenDayEnding,WastewaterRNA\n" + "".join(f"{d},{10 + i % 7}\n" for i, d in enumerate(ymd)),
+        "health_board": "WeekEnding,HBName,HBcode,Average(Mgc)\n" + "".join(f"{d},Board,S08000031,{5 + i % 5}\n" for i, d in enumerate(ymd)),
+        "council_area": "WeekEnding,LAName,LAcode,Average(Mgc)\n" + "".join(f"{d},Area,S12000049,{5 + i % 4}\n" for i, d in enumerate(ymd)),
+        "treatment_works": "WeekEnding,WastewaterTreatmentWork,Average(Mgc)\n" + "".join(f"{d},Works,{5 + i % 3}\n" for i, d in enumerate(ymd)),
+        "positivity": "WeekEnding,Pathogen,PositivityPercentage\n"
+        + "".join(f"{d},{p},{2 + i % 6}\n" for i, d in enumerate(ymd) for p in ("Influenza (All)", "RSV")),
+        "cases_by_board": "WeekEnding,HBcode,HBName,Pathogen,RateCasesPerWeek,Population\n"
+        + "".join(f"{d},S08000031,Board,{p},{3 + i % 5},1000000\n" for i, d in enumerate(ymd) for p in ("Influenza (All)", "RSV")),
+    }
+    rid_to_key = {rid: key for key, rid in sc.RESOURCES.items()}
+    state = {"week": 1, "broken": None}
+
+    class Resp:
+        def __init__(self, url, body):
+            self.url, self.body, self.status_code, self.is_redirect, self.headers = url, body, 200, False, {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size):
+            yield self.body
+
+    def get(url, params=None, **kw):
+        if url == sc.CKAN_API:
+            resources = [{"id": rid, "url": f"https://www.opendata.nhs.scot/dl/week{state['week']}/{rid}.csv"} for rid in sc.RESOURCES.values()]
+            return Resp(url, json.dumps({"result": {"resources": resources}}).encode())
+        rid = url.rsplit("/", 1)[1].removesuffix(".csv")
+        key = rid_to_key[rid]
+        body = b"<html>Service unavailable</html>" if key == state["broken"] else files[key].encode()
+        return Resp(url, body)
+
+    def run():
+        fetcher = Fetcher(cache_dir=tmp_path / "cache", max_age_hours=0, retries=1)
+        monkeypatch.setattr(fetcher._session, "get", get)
+        prepared, errors = collect([sc.Scotland()], fetcher)
+        return {p.pathogen for p in prepared}, errors
+
+    assert run() == ({"covid", "flu", "rsv"}, [])
+    state.update(week=2, broken="positivity")  # new links, and the new lab file is junk
+    assert run() == ({"covid", "flu", "rsv"}, [])
+    state.update(week=3, broken="national")  # new links again, now the wastewater file is junk
+    assert run() == ({"covid", "flu", "rsv"}, [])

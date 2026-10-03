@@ -258,7 +258,13 @@ async function show(countryId, regionId, virus) {
   const wanted = virus ?? state.virus;
   const chosen = available.includes(wanted) ? wanted : available[0];
   $("main").setAttribute("aria-busy", "true");
-  const data = await loadData(meta.id, chosen);
+  let data;
+  try {
+    data = await loadData(meta.id, chosen);
+  } catch (err) {
+    if (token !== showToken) return; // a newer selection has taken over; its result is what counts
+    throw err;
+  }
   if (token !== showToken) return; // a newer selection started while this one loaded
 
   const countryChanged = meta.id !== state.countryId;
@@ -299,9 +305,14 @@ function selectRegion(id) {
 function safeShow(...args) {
   return show(...args).catch((err) => {
     $("main").setAttribute("aria-busy", "false");
+    const message = `Couldn't load that data (${err.message}). Check your connection and try again.`;
+    if ($("verdict").hidden) {
+      $("load-status").textContent = message; // nothing shown yet, so say it where the user is looking
+      return;
+    }
     const note = $("virus-note");
     note.hidden = false;
-    note.textContent = `Couldn't load that data (${err.message}). Check your connection and try again.`;
+    note.textContent = message;
   });
 }
 
@@ -995,8 +1006,8 @@ async function init() {
       "This data was made by a different version of Sewer Signal. Rebuild it with \"python -m wastewater build\", or wait for the next daily refresh.";
     return;
   }
-  if (!state.index.countries.length) {
-    $("load-status").textContent = "The last data build produced no countries. Check the build log.";
+  if (!state.index.countries.length || !state.index.viruses.length) {
+    $("load-status").textContent = "The last data build produced no usable data. Check the build log.";
     return;
   }
   try {
@@ -1006,6 +1017,7 @@ async function init() {
     if (!own(state.virusLabels, state.virus)) state.virus = virusIds[0];
     state.planViruses = Array.isArray(state.planViruses) ? virusIds.filter((v) => state.planViruses.includes(v)) : virusIds;
     if (!(state.trip && typeof state.trip.country === "string")) state.trip = null;
+    state.activity = activityById(state.activity).id;
     try {
       localStorage.removeItem("sewer-signal:vulnerable"); // saved by older versions
     } catch {
@@ -1029,7 +1041,6 @@ function isValidIndex(ix) {
     Array.isArray(ix.countries) &&
     Array.isArray(ix.categories) &&
     Array.isArray(ix.viruses) &&
-    ix.viruses.length > 0 &&
     ix.countries.every((c) => c && typeof c.id === "string" && c.viruses && typeof c.viruses === "object")
   );
 }
