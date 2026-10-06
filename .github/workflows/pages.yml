@@ -72,9 +72,13 @@ jobs:
           key: downloads-${{ github.run_id }}
           restore-keys: downloads-
       - run: python -m wastewater -v build
+      # Keep each published copy of the site for 90 days (the default is 1), so
+      # what the site said on any day stays on record until the forecast
+      # archive takes over.
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
+          retention-days: 90
 
   deploy:
     name: Deploy
