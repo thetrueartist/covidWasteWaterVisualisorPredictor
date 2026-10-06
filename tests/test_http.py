@@ -149,3 +149,54 @@ def test_a_good_parse_keeps_the_new_copy(tmp_path, monkeypatch):
     with f.cache_only():
         assert f.get_bytes(OK) == b"v2"
     assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_provenance_records_each_body_used(tmp_path, monkeypatch):
+    import hashlib
+
+    def with_date(u, body=b"v1"):
+        r = FakeResponse(u, body=body)
+        r.headers["Last-Modified"] = "Mon, 05 Oct 2026 10:00:00 GMT"
+        return r
+
+    f = fetcher(tmp_path, monkeypatch, with_date)
+    f.get_bytes(OK)
+    f.get_bytes("https://data.rivm.nl/b.csv", params={"z": 1, "a": "x y"})
+    assert f.provenance == {
+        OK: {"sha256": hashlib.sha256(b"v1").hexdigest(), "last_modified": "Mon, 05 Oct 2026 10:00:00 GMT", "from_cache": False},
+        "https://data.rivm.nl/b.csv?a=x+y&z=1": {"sha256": hashlib.sha256(b"v1").hexdigest(),
+                                                 "last_modified": "Mon, 05 Oct 2026 10:00:00 GMT", "from_cache": False},
+    }
+    # served from the cache: no header to report
+    f.get_bytes(OK)
+    assert f.provenance[OK] == {"sha256": hashlib.sha256(b"v1").hexdigest(), "last_modified": None, "from_cache": True}
+    # a failed download that falls back to the last good copy says so
+    broken = fetcher(tmp_path, monkeypatch, lambda u: FakeResponse(u, status=503), max_age_hours=0)
+    broken.get_bytes(OK)
+    assert broken.provenance[OK]["from_cache"] is True
+
+
+def test_provenance_describes_the_copy_used_after_a_rollback(tmp_path, monkeypatch):
+    import hashlib
+
+    fetcher(tmp_path, monkeypatch, lambda u: FakeResponse(u, body=b"good")).get_bytes(OK)
+    f = fetcher(tmp_path, monkeypatch, lambda u: FakeResponse(u, body=b"<html>"), max_age_hours=0)
+    with pytest.raises(ValueError):
+        with f.transaction():
+            f.get_bytes(OK)
+            raise ValueError("didn't parse")
+    assert f.provenance[OK]["sha256"] == hashlib.sha256(b"<html>").hexdigest()
+    with f.cache_only():
+        f.get_bytes(OK)
+    assert f.provenance[OK] == {"sha256": hashlib.sha256(b"good").hexdigest(), "last_modified": None, "from_cache": True}
+
+
+def test_odd_last_modified_headers_are_dropped(tmp_path, monkeypatch):
+    def odd(u):
+        r = FakeResponse(u)
+        r.headers["Last-Modified"] = "x" * 500
+        return r
+
+    f = fetcher(tmp_path, monkeypatch, odd)
+    f.get_bytes(OK)
+    assert f.provenance[OK]["last_modified"] is None

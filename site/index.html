@@ -178,7 +178,7 @@
         <ul class="level-table" id="level-table"></ul>
         <h3>The forecast</h3>
         <p>Each virus has its own gradient-boosted models, trained on every area that publishes that virus. They look at how fast each area's level has been changing, and at the trend across its whole country. They predict a range for each of the next six weeks, not a single number. Which inputs each virus's model uses was chosen by testing the options on two separate held-out years. Published data runs one to two weeks behind, so part of the forecast covers weeks that have already started.</p>
-        <p>Where the model did no better than "assume nothing changes" in back-testing, that country's forecast uses no change instead. The table re-makes the past year's forecasts using today's data. Every forecast the site publishes is also saved and checked once the real data arrives: that's the live track record.</p>
+        <p>Where the model did no better than "assume nothing changes" in back-testing, that country's forecast uses no change instead. The back-test table re-makes the past year's forecasts using today's data. The model never trained on those weeks, but its ranges, the switch to no change and which inputs it uses were tuned on them, so it's a best case, not a record of what the site said at the time. Every forecast the site publishes is also saved and checked once the real data arrives: that's the live track record.</p>
         <h3>What it can't tell you</h3>
         <p>Wastewater tracks community trends, not the risk of any single outing. Small treatment works give noisy readings. The advice here follows general public-health practice. It is not medical advice. If you're unwell, stay home. If you're at high risk, follow your clinician's guidance.</p>
       </div>
@@ -186,6 +186,14 @@
         <h3 id="metrics-heading">Back-test on the last year</h3>
         <div class="table-scroll"><table class="metrics" id="metrics-table"></table></div>
         <p class="fine" id="metrics-note"></p>
+        <h3 id="live-heading">Live track record</h3>
+        <p class="fine" id="live-intro">Loading the live track record…</p>
+        <div class="table-scroll"><table class="metrics live" id="live-table" hidden></table></div>
+        <div class="live-notes" id="live-notes"></div>
+        <div id="live-country" hidden>
+          <h4 class="sub-heading" id="live-country-heading"></h4>
+          <div class="table-scroll"><table class="metrics live" id="live-country-table"></table></div>
+        </div>
         <h3>Data source</h3>
         <p class="source" id="source"></p>
       </div>

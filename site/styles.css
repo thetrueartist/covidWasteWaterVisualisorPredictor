@@ -1179,6 +1179,25 @@ th.num {
   margin-top: 8px;
 }
 
+/* six columns: let the headings wrap so the table fits beside the back-test */
+.metrics.live th {
+  white-space: normal;
+  vertical-align: bottom;
+}
+
+.live-notes p {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin-top: 6px;
+  max-width: 65ch;
+}
+
+.sub-heading {
+  font-size: var(--step--1);
+  font-weight: 600;
+  margin: 0.75rem 0 0.25rem;
+}
+
 .source {
   font-size: var(--step--1);
   color: var(--ink-2);

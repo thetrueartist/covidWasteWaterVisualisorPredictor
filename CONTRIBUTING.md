@@ -18,11 +18,11 @@ cached downloads, which is handy while working on the model or the site.
 ## Checks
 
 ```bash
-pytest          # Python: adapters, preprocessing, models, downloads, server, installer, build
-npm test        # front-end go/avoid logic (plain node, no dependencies)
+pytest          # Python: adapters, preprocessing, models, downloads, archive, scoring, server, installer, build
+npm test        # front-end go/avoid logic and track record display (plain node, no dependencies)
 ```
 
-CI runs both on every push.
+The gatekeeper tests need `bash`, `gzip` and `jq`. CI runs both on every push.
 
 Dependencies are listed in `pyproject.toml` and pinned with hashes in
 `requirements.txt`, for every Python from 3.10 up. To update the pins:
@@ -67,6 +67,28 @@ records which design each one uses. Those choices come from
 with that comparison before and after. A change that helps one held-out year
 but hurts the other isn't an improvement. The README lists ideas that were
 dropped for exactly that reason.
+
+## The forecast archive and live track record
+
+`build --archive DIR` saves what the site published to `DIR/v2/<virus>/<country>/`
+whenever it changed (`wastewater/archive.py`), and `score --archive DIR` checks
+saved forecasts once their outcome is in (`wastewater/scoring.py`). On GitHub
+the files are added to the `forecast-archive` branch by the archive job in
+`.github/workflows/pages.yml`, after `.github/scripts/check-new-forecasts.sh`
+has checked them. That branch grows every day, so clone with
+`git clone --single-branch` (or `--depth 1`) unless you need it.
+
+Saved files are permanent and public, so:
+
+- Don't change what an existing field means. A different format gets a new
+  schema number and a new top folder (`v3/`), and the scorer keeps reading `v2/`.
+- If a mistake is found in saved forecasts, add a correction alongside them;
+  never edit or delete saved files.
+- The writer and the gatekeeper script must agree, limits included
+  (`archive.MAX_*` and the script's `max_*`). `tests/test_check_script.py`
+  runs the script on a real build's output, so change both together.
+- Decide how a new metric will be reported before results come in, and keep
+  headline claims to the per-virus rows that have 26 or more weeks checked.
 
 ## Style
 

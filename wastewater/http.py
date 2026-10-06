@@ -14,7 +14,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 import requests
 
@@ -51,6 +51,13 @@ class Fetcher:
 
     ``offline=True`` serves only from the cache, which is handy for working on
     the model or the site without hammering public data portals.
+
+    ``provenance`` records every body handed out this run, keyed by URL (with
+    its query): its SHA-256, the server's Last-Modified header (None for a
+    cached copy) and whether it came from the cache. The forecast archive
+    saves this with each issue, so anyone can tell which upstream files a
+    forecast was made from. A later request for the same URL replaces the
+    entry, so it always describes the copy that was actually used.
     """
 
     def __init__(
@@ -70,6 +77,7 @@ class Fetcher:
         self._session.headers["User-Agent"] = USER_AGENT
         self._backups: dict[Path, Path | None] | None = None
         self._cache_only = False
+        self.provenance: dict[str, dict] = {}
 
     def _cache_path(self, url: str, params: Mapping[str, Any] | None, tag: str | None = None) -> Path:
         key = url
@@ -79,24 +87,34 @@ class Fetcher:
             key += "#" + tag
         return self.cache_dir / hashlib.sha256(key.encode()).hexdigest()[:32]
 
+    def _used(self, url: str, params: Mapping[str, Any] | None, body: bytes, from_cache: bool,
+              last_modified: str | None = None) -> bytes:
+        key = url + ("?" + urlencode(sorted((str(k), str(v)) for k, v in params.items())) if params else "")
+        self.provenance[key] = {
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "last_modified": last_modified,
+            "from_cache": from_cache,
+        }
+        return body
+
     def get_bytes(self, url: str, params: Mapping[str, Any] | None = None, tag: str | None = None) -> bytes:
         path = self._cache_path(url, params, tag)
         if path.exists():
             age = time.time() - path.stat().st_mtime
             # A modification time in the future isn't trusted as fresh.
             if self.offline or 0 <= age < self.max_age:
-                return path.read_bytes()
+                return self._used(url, params, path.read_bytes(), True)
             if self._cache_only and 0 <= age <= STALE_LIMIT_DAYS * 86400:
-                return path.read_bytes()
+                return self._used(url, params, path.read_bytes(), True)
         if self.offline or self._cache_only:
             raise FileNotFoundError(f"no usable cached copy of {url}")
 
         last_error: Exception | None = None
         for attempt in range(self.retries):
             try:
-                content = self._download(url, params)
+                content, last_modified = self._download(url, params)
                 self._store(path, content)
-                return content
+                return self._used(url, params, content, False, last_modified)
             except requests.RequestException as exc:
                 last_error = exc
                 log.warning("download failed (%s/%s) %s: %s", attempt + 1, self.retries, url, exc)
@@ -111,7 +129,7 @@ class Fetcher:
             age_days = (time.time() - path.stat().st_mtime) / 86400
             if 0 <= age_days <= STALE_LIMIT_DAYS:
                 log.warning("using the cached copy of %s from %.1f days ago", url, age_days)
-                return path.read_bytes()
+                return self._used(url, params, path.read_bytes(), True)
             log.warning("cached copy of %s is too old to use (%.0f days)", url, age_days)
         raise RuntimeError(f"could not download {url}") from last_error
 
@@ -170,8 +188,11 @@ class Fetcher:
         finally:
             self._cache_only = False
 
-    def _download(self, url: str, params: Mapping[str, Any] | None) -> bytes:
-        """GET from an allowed HTTPS host, checking every redirect and capping the size."""
+    def _download(self, url: str, params: Mapping[str, Any] | None) -> tuple[bytes, str | None]:
+        """GET from an allowed HTTPS host, checking every redirect and capping the size.
+
+        Returns the body and the Last-Modified header, if the server sent a plausible one.
+        """
         for _ in range(MAX_REDIRECTS + 1):
             _check_url(url)
             with self._session.get(
@@ -188,7 +209,10 @@ class Fetcher:
                     if size > MAX_BYTES:
                         raise ValueError(f"response from {url} is larger than {MAX_BYTES // 2**20} MB")
                     chunks.append(chunk)
-                return b"".join(chunks)
+                last_modified = resp.headers.get("Last-Modified")
+                if not (isinstance(last_modified, str) and 0 < len(last_modified) <= 64 and last_modified.isprintable()):
+                    last_modified = None
+                return b"".join(chunks), last_modified
         raise ValueError(f"too many redirects fetching {url}")
 
     def get_text(self, url: str, params: Mapping[str, Any] | None = None, tag: str | None = None) -> str:

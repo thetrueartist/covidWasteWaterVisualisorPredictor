@@ -54,7 +54,7 @@ the Netherlands and New Zealand.
 On any Linux machine with internet access:
 
 ```bash
-git clone https://github.com/thetrueartist/covidWasteWaterVisualisorPredictor.git sewer-signal
+git clone --single-branch https://github.com/thetrueartist/covidWasteWaterVisualisorPredictor.git sewer-signal
 cd sewer-signal
 ./install.sh              # install, build the data, start on http://localhost:8000
 ./install.sh --service    # or keep it running in the background, refreshed daily
@@ -150,12 +150,14 @@ years but didn't help flu or RSV.
 **Keeping it honest.** The most recent year is held out and each model is scored against simply
 assuming "no change". Where a model doesn't win for a country and horizon, its forecasts fall back to
 no-change. The same hold-out calibrates the ranges so the 50% and 90% bands cover about 50% and 90% of
-outcomes. Because the ranges and fallbacks were tuned on that same year, and the forecasts are re-made
-from today's (revised) data, these back-test numbers are a best case rather than a record of what the
-site said at the time. The site also shows fairer comparisons: accuracy leaving out weeks that start at
-"very low" (over half of COVID's, where any method does well), and the whole forecast range scored
+outcomes. The model never trained on those weeks, but the ranges, the fallbacks and the choice of model
+inputs were tuned on that same year, and the forecasts are re-made from today's (revised) data. So these
+back-test numbers are a best case rather than a record of what the site said at the time. That record is
+the live track record below. The site also shows fairer comparisons: accuracy leaving out weeks that start
+at "very low" (over half of COVID's, where any method does well), and the whole forecast range scored
 against "no change" with the same uncertainty. Forecasts are least reliable around peaks and at the start
-of new waves, and COVID's longer-range forecasts have tended to run high after a peak.
+of new waves, and COVID's longer-range forecasts have tended to run high after a peak. Published data also
+runs one to two weeks behind, so a "1 week ahead" forecast is often for a week that has already ended.
 Back-test results from the 2 Oct 2026 build (the site shows the latest ones):
 
 | Weeks ahead | 1 | 2 | 3 | 4 | 5 | 6 |
@@ -185,6 +187,56 @@ Where the model loses (New Zealand at one to four weeks, Germany at six weeks fo
 no-change instead. Flu and RSV follow a yearly season, so they're easier to forecast than COVID. One idea
 tried and dropped: per-level sample weights, which were no more accurate and about 6× slower.
 
+**Live track record.** The real test is forecasts made before anyone knew the outcome, so the site's
+forecasts are saved on the day they're published and checked later. If saving fails on a day, that day's
+forecasts are missing from the record, and the workflow run says why:
+
+- **What's saved.** Each daily build saves what it published for each country and virus to the public
+  [`forecast-archive`](../../tree/forecast-archive) branch, whenever it changed since the last saved copy.
+  With it go the code version, the model settings and the SHA-256 of every upstream file used, plus the
+  last 13 weeks of each area's level as published. The workflow only ever adds files, and any later
+  change or removal would show in the branch's public history. The format is described in
+  `wastewater/archive.py`. The archive job won't take forecasts made from data more than 35 days old,
+  because it can't tell them apart from back-dated ones, or from data dated more than 7 days ahead. So
+  the site doesn't publish a forecast for such an area (it still shows the data): it only publishes
+  forecasts that can be saved. In early-October data that was a handful of areas, mostly treatment
+  plants that report several weeks late.
+- **Which forecast counts.** The first one published from each week of data, and only if it was published
+  before the data for its target week was. The archive records what the build reported. The archive job
+  stops saved files being replaced and new ones being dated before them or in the future, but it can't
+  check the data itself: a build that had been tampered with could still hold back or misreport data,
+  including the weeks forecasts are checked against. The public commit history and the publishers' own
+  data are the check on that.
+- **What it's checked against.** The target week as the site itself published it, once the following week
+  has been reported too and has ended, so the week is complete. If a publisher has since rescaled its
+  whole history (Germany's RKI has, several times), the change of scale is measured from the weeks both
+  copies share, as the ratio of their values (leaving out the forecast's own newest week, which is often
+  only partly reported), and the later copy is divided by it. Weeks that were filled in between
+  measurements aren't scored. Weeks measured as zero (below detection) are, and the results are also
+  given without them.
+- **What's reported.** For each virus and number of weeks ahead, for everything the site showed (the model
+  and the no-change fallback together): how often it was at the right level against assuming no change,
+  the typical miss, how often the outcome fell in the 50% and 90% ranges, the interval and ranked
+  probability scores against no change with the same spread and against a flat 20% per level, and the
+  bias. The levels use the cut-offs that applied when the forecast was made, as in the back-test.
+  Forecasts made in the same week share their errors, so what counts is weeks, not forecasts: the 90%
+  range on the gain over no change comes from resampling runs of whole weeks.
+- **When it means something.** Numbers appear once 8 weeks of data have been checked. Until 26 weeks
+  (about one winter) they're marked as still settling, and only then does the site give a verdict, which
+  says "not clearly different" unless the 90% range rules out no difference, and "about the same" if the
+  whole range is within 1 point of it. Forecasts that couldn't be checked are counted by reason. That
+  includes forecasts from areas that stopped reporting (whose data fell more than 6 weeks behind the
+  rest of their country) before their target week came in, which are also counted by the level the area
+  was at, because areas that drop out when levels are low could flatter the record. The site lists any
+  country that has stopped saving.
+
+`python -m wastewater score --archive DIR` writes `site/data/track-record.json`; on GitHub this runs as
+its own step after each build, so a scoring problem never holds up the site. A build without `--archive`
+writes a short file there saying it isn't recording. If the workflow couldn't fetch or score the archive,
+it writes one saying the track record couldn't be updated this time. Self-hosted installs keep
+the same record in a local `forecast-archive/` folder and score it after each daily refresh. The scoring
+rules are in `wastewater/scoring.py`.
+
 **Should I go?** `site/js/advisor.js` adds the expected level (averaged over the forecast's probabilities,
 so uncertainty counts), the activity's exposure, and +1.25 if you or someone you'll see is at higher risk.
 That total maps to the four verdicts, worked out separately for each virus you tick. A gig at very low
@@ -194,15 +246,16 @@ gives the strictest verdict, and a better week is one where even the strictest v
 ## Development
 
 ```bash
-pytest       # adapters, preprocessing, models, server, installer, end-to-end build (about 20 s)
-npm test     # go/avoid logic (node --test, no dependencies)
+pytest       # adapters, preprocessing, models, archive, scoring, server, installer, build (about a minute)
+npm test     # go/avoid logic and the track record display (node --test, no dependencies)
 ```
 
 ```
-wastewater/   sources/ (one adapter per country) · preprocess · model · risk · build · cli
-site/         index.html · styles.css · js/{app,chart,advisor,dates,format}.js
+wastewater/   sources/ (one adapter per country) · preprocess · model · risk · build · archive · scoring · cli
+site/         index.html · styles.css · js/{app,chart,advisor,track,dates,format}.js
 tests/        pytest suite · js/ node tests
 install.sh    Linux installer and service manager
+.github/      CI, the daily build and deploy, and the forecast archive's gatekeeper script
 docs/         hosting guide, screenshots
 ```
 

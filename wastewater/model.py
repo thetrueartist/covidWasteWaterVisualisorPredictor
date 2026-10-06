@@ -231,15 +231,22 @@ class Forecaster:
     # country -> horizons where "no change" beat the model in back-testing.
     fallback: dict = field(default_factory=dict)
     n_train_rows: int = 0
+    # The newest week whose level the models learned from (a training target).
+    trained_through: pd.Timestamp | None = None
 
     def fit(self, ds: Dataset, until: pd.Timestamp | None = None) -> "Forecaster":
         """Train on rows whose target was observed on or before ``until``."""
         df = ds.frame
         cols = self.spec.columns()
+        self.trained_through = None
         for h in HORIZONS:
             mask = _train_mask(ds, self.pathogen, self.spec, until, h)
             X, y = df.loc[mask, cols], df.loc[mask, f"target_h{h}"]
             self.n_train_rows = max(self.n_train_rows, int(mask.sum()))
+            if mask.any():
+                last_target = df.loc[mask, "date"].max() + pd.Timedelta(weeks=h)
+                if self.trained_through is None or last_target > self.trained_through:
+                    self.trained_through = last_target
             log.info("%s: fitting %d-week horizon on %d rows", self.pathogen, h, len(X))
             for q in self.quantiles:
                 self.models[(h, q)] = _new_model(self.spec, q, self.seed).fit(X, y)

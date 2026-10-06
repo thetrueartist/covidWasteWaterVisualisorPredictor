@@ -18,7 +18,7 @@ nothing.
 ## 1. Your own Linux box
 
 ```bash
-git clone https://github.com/thetrueartist/covidWasteWaterVisualisorPredictor.git sewer-signal
+git clone --single-branch https://github.com/thetrueartist/covidWasteWaterVisualisorPredictor.git sewer-signal
 cd sewer-signal
 ./install.sh --service
 ```
@@ -61,6 +61,76 @@ The site appears at
 Pages on a private repository needs a paid GitHub plan. On a public
 repository it's free. While Pages is off, the workflow skips itself with a
 notice instead of failing, so a private repo can use option 1 or 4 instead.
+
+### The forecast record
+
+The workflow also saves the forecasts it publishes to a `forecast-archive`
+branch, which it creates on its first run, and the site checks them later
+(its "Live track record"). Only the workflow's last job can write: it runs
+after the site is deployed, runs no project code, checks the new files with
+`.github/scripts/check-new-forecasts.sh` and only ever adds files. The build
+job, which installs packages, has a read-only token. If that job fails, the
+day's forecasts stay published but aren't saved, so check failed runs.
+
+That record is only worth something if nobody can quietly rewrite it, so set
+up two branch rulesets once. This needs admin rights on the repository.
+
+1. **`forecast-archive`: keep its history.** Go to **Settings → Rules →
+   Rulesets → New ruleset → New branch ruleset**. Name it `forecast-archive:
+   keep history`, set **Enforcement status** to **Active**, and under **Target
+   branches** add the pattern `forecast-archive`. Keep **Restrict deletions**
+   and **Block force pushes** ticked, and leave the bypass list empty. Nobody
+   can then delete the branch or rewrite its history. Anyone with write access
+   (and the workflow's token) could still push a new commit that changes or
+   removes a file, but that commit would show in the branch's public history.
+   The workflow itself only ever adds new files. (GitHub has no rule that
+   allows adding files but blocks changing them.)
+2. **`main`: only you.** Make a second branch ruleset, `main: owner only`,
+   targeting the default branch. Tick **Restrict deletions**, **Block force
+   pushes** and **Restrict updates**, and add the **Repository admin** role to
+   the bypass list with **Always allow**. You can still push to `main`
+   directly or merge pull requests, as now, but the workflow's token (and
+   anyone else with write access) can't change `main`. If other people should
+   be able to merge pull requests, add their role to the bypass list too.
+
+Or with the GitHub CLI (replace `OWNER/REPO`; actor 5 is the Repository admin
+role, which the ruleset page shows if you want to check):
+
+```bash
+gh api -X POST repos/OWNER/REPO/rulesets --input - <<'JSON'
+{"name": "forecast-archive: keep history", "target": "branch", "enforcement": "active",
+ "conditions": {"ref_name": {"include": ["refs/heads/forecast-archive"], "exclude": []}},
+ "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}], "bypass_actors": []}
+JSON
+gh api -X POST repos/OWNER/REPO/rulesets --input - <<'JSON'
+{"name": "main: owner only", "target": "branch", "enforcement": "active",
+ "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+ "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "update"}],
+ "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]}
+JSON
+```
+
+Three things these don't cover:
+
+- **Admins can still change the rulesets.** The evidence that the record
+  wasn't rewritten is the branch's public commit history: every file is added
+  by the workflow, in a commit that links to the run that made it.
+- **Anyone with write access can commit changes to saved files.** Keep that
+  list short. Such a commit stays in the public history. It's also how you'd
+  clean up junk if a build were ever tampered with: remove the files with
+  `git rm` in an ordinary commit (the rulesets allow that), which stays
+  public too.
+- **GitHub may pause scheduled workflows** in a public repository after 60
+  days without activity. Whether the workflow's own commits to
+  `forecast-archive` count as activity hasn't been checked. If it happens, the
+  Actions tab shows a banner; turn the workflow back on there, or run
+  `gh workflow enable pages.yml`. A gap in the record shows on the site.
+
+Self-hosted installs keep the same record in a local `forecast-archive/`
+folder, score it after each daily refresh, and `./install.sh status` shows
+its size and newest file. It grows by up to about 70 MB a year if every
+country's data changes every day (a full day's set is about 200 kB). Back
+that folder up: the saved forecasts can't be made again.
 
 ## 3. Behind Caddy or nginx
 

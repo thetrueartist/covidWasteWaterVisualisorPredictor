@@ -2,7 +2,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-.cache/
+.cache
+.ruff_cache/
 site/data/*.json
 !site/data/.gitkeep
 *.egg-info/
@@ -16,3 +17,7 @@ node_modules/
 .refresh.log
 .server.log.1
 .server.err
+# the live forecast record (kept on the forecast-archive branch, or locally by install.sh)
+/forecast-archive/
+/archive/
+/archive-new/

@@ -134,6 +134,8 @@ VENV="$APP_DIR/.venv"
 PY="$VENV/bin/python"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 PID_FILE="$APP_DIR/.server.pid"
+# The forecasts this install publishes are saved here (the live track record).
+RECORD_DIR="$APP_DIR/forecast-archive"
 LOG_FILE="$APP_DIR/.server.log"
 ERR_FILE="$APP_DIR/.server.err" # startup errors; the log itself is capped by the server
 
@@ -278,10 +280,16 @@ setup_venv() {
 build_data() {
   [ "$SKIP_BUILD" = 1 ] && { info "skipping the data build (--no-build)"; return; }
   step "Downloading wastewater data and training the forecasts (5-10 minutes)"
-  local args=(-m wastewater build)
+  # Each published forecast is saved to $RECORD_DIR, then the saved ones are scored.
+  local args=(-m wastewater build --archive "$RECORD_DIR")
   [ -n "$COUNTRIES" ] && args+=(--countries "$COUNTRIES")
   if (cd "$APP_DIR" && "$PY" "${args[@]}"); then
     ok "data written to $APP_DIR/site/data"
+    if (cd "$APP_DIR" && "$PY" -m wastewater score --archive "$RECORD_DIR" --out "$APP_DIR/site/data/track-record.json" >/dev/null); then
+      ok "live track record updated"
+    else
+      warn "couldn't update the live track record; the rest of the site is fine"
+    fi
   elif [ -f "$APP_DIR/site/data/index.json" ]; then
     warn "the build failed; keeping the previous data"
   else
@@ -366,7 +374,7 @@ TasksMax=256
 
 [Install]
 WantedBy=default.target"
-  local build_args="-m wastewater build"
+  local build_args="-m wastewater build --archive $RECORD_DIR"
   [ -n "$COUNTRIES" ] && build_args+=" --countries $COUNTRIES"
   write_unit "$APP-refresh.service" "[Unit]
 Description=Refresh Sewer Signal wastewater data and forecasts
@@ -376,6 +384,7 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=$APP_DIR
 ExecStart=$PY $build_args
+ExecStart=$PY $(score_args)
 TimeoutStartSec=1h
 Nice=10
 NoNewPrivileges=true
@@ -431,6 +440,24 @@ server_pid() { # pid of our background server, if it's really ours
 }
 
 CRON_TAG=" # $APP-cron"
+
+# Scoring the saved forecasts into the site's live track record.
+score_args() { printf '%s' "-m wastewater score --archive $RECORD_DIR --out $APP_DIR/site/data/track-record.json"; }
+
+record_summary() { # one line about the saved forecasts: how many, how big, the newest
+  local base="$RECORD_DIR/v2" count size newest
+  if [ ! -d "$base" ]; then printf 'no forecasts saved yet'; return; fi
+  count="$(find "$base" -type f -name '*.jsonl.gz' 2>/dev/null | wc -l | tr -d ' ')"
+  size="$(du -sh "$RECORD_DIR" 2>/dev/null | cut -f1)"
+  newest="$(find "$base" -type f -name '*.jsonl.gz' -printf '%f\n' 2>/dev/null \
+    | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z\.jsonl\.gz$' | LC_ALL=C sort | tail -n 1 || true)"
+  if [ -n "$newest" ]; then
+    newest="${newest:0:10} ${newest:11:2}:${newest:13:2} UTC"
+  else
+    newest="none"
+  fi
+  printf '%s files, %s, newest saved %s (%s)' "$count" "${size:-?}" "$newest" "$RECORD_DIR"
+}
 
 cron_replace() { # cron_replace "new lines": drops only lines ending in our tag, keeps everything else as is
   local current
@@ -501,12 +528,13 @@ start_background() {
 
 install_cron() {
   command -v crontab >/dev/null 2>&1 || die "neither systemd user services nor cron are available. Start it yourself with: $(start_hint)"
-  local build_args="-m wastewater build"
+  local build_args="-m wastewater build --archive $RECORD_DIR"
   [ -n "$COUNTRIES" ] && build_args+=" --countries $COUNTRIES"
   safe_target "$APP_DIR/.refresh.log"
   (umask 077; : >> "$APP_DIR/.refresh.log") # private, like the server log
   # Paths and arguments were validated to plain characters above, so these lines can't be bent.
-  cron_replace "15 7 * * * cd $APP_DIR && timeout 3600 $PY $build_args >> $APP_DIR/.refresh.log 2>&1$CRON_TAG
+  # The build, then the track record, each with its own time limit.
+  cron_replace "15 7 * * * cd $APP_DIR || exit 1; timeout 3600 $PY $build_args >> $APP_DIR/.refresh.log 2>&1; timeout 600 $PY $(score_args) >> $APP_DIR/.refresh.log 2>&1$CRON_TAG
 @reboot cd $APP_DIR || exit 1; umask 077; $PY -m wastewater serve --host $HOST --port $PORT --log-file $LOG_FILE > /dev/null 2> $ERR_FILE & echo \$! > $PID_FILE$CRON_TAG"
   start_background
   ok "running in the background (pid $(server_pid)); cron refreshes data daily and restarts it after a reboot"
@@ -592,7 +620,9 @@ cmd_update() {
     if [ -n "$(git -C "$APP_DIR" status --porcelain --untracked-files=no)" ]; then
       warn "you have local changes; skipping git pull"
     else
-      git -C "$APP_DIR" pull --ff-only && ok "code is up to date"
+      # Only the checked-out branch, not the ever-growing forecast-archive branch.
+      git -C "$APP_DIR" pull --ff-only origin "$(git -C "$APP_DIR" rev-parse --abbrev-ref HEAD)" \
+        && ok "code is up to date"
     fi
   fi
   setup_venv
@@ -614,6 +644,7 @@ cmd_status() {
   else
     printf '%sData%s      not built yet\n' "$B" "$RST"
   fi
+  printf '%sRecord%s    %s\n' "$B" "$RST" "$(record_summary)"
   printf '%sMode%s      %s\n' "$B" "$RST" "${SAVED_MODE:-not installed}"
   printf '%sCountries%s %s\n' "$B" "$RST" "$(if [ -n "$SAVED_COUNTRIES" ]; then printf '%s' "$SAVED_COUNTRIES"; else printf 'all'; fi)"
   if [ "$SAVED_MODE" = systemd ] && has_systemd_user; then
@@ -644,7 +675,9 @@ cmd_uninstall() {
   [ -L "$PID_FILE" ] || rm -f -- "$PID_FILE"
   if ours "$STATE_FILE" && [ -e "$STATE_FILE" ]; then rm -f -- "$STATE_FILE"; fi
   [ "$leftover" = 0 ] || warn "some pieces were left in place (see above)"
-  info "The folder is still there. To delete it: rm -rf $(printf '%q' "$APP_DIR")"
+  info "The folder is still there, including forecast-archive/, which holds the forecasts this"
+  info "install has published (its live track record). It's kept on purpose, because the saved"
+  info "forecasts can't be made again. To delete everything: rm -rf $(printf '%q' "$APP_DIR")"
 }
 
 case "$CMD" in

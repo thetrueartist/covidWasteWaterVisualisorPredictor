@@ -1,4 +1,4 @@
-"""Command line: ``python -m wastewater build`` and ``python -m wastewater serve``."""
+"""Command line: ``python -m wastewater build``, ``score`` and ``serve``."""
 
 from __future__ import annotations
 
@@ -68,6 +68,8 @@ def _build(args: argparse.Namespace, fetcher: Fetcher) -> int:
         fetcher=fetcher,
         holdout_weeks=args.holdout_weeks,
         max_iter=args.max_iter,
+        archive=args.archive,
+        archive_new=args.archive_new,
     )
     labels = {v["id"]: v["label"] for v in index["viruses"]}
     for c in index["countries"]:
@@ -84,6 +86,34 @@ def _build(args: argparse.Namespace, fetcher: Fetcher) -> int:
         where = "/".join(x for x in (e.get("country"), e.get("virus")) if x)
         print(f"  ! {where}: {e['error']}", file=sys.stderr)
     return 1 if not index["countries"] else 0
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    """Score the forecast archive into the site's track-record.json."""
+    from .scoring import score_archive, write_track_record
+
+    archive = Path(args.archive)
+    if not archive.is_dir():
+        print(f"No forecast archive at {archive}. Build with --archive {archive} first.", file=sys.stderr)
+        return 1
+    record = score_archive(archive)
+    write_track_record(record, args.out)
+    # Whatever could be scored is published: parts that couldn't are left out and listed here
+    # (with the reason in the log), so they never take the rest of the record down with them.
+    print(f"Track record: {record['issues']} saved issues since {record['since'] or 'n/a'}, written to {args.out}")
+    for virus, v in record["by_virus"].items():
+        if v.get("available") is False:
+            print(f"  ! {virus}: couldn't be summarised, so it's left out", file=sys.stderr)
+            continue
+        checked = sum(r["n"] for r in v["by_horizon"])
+        weeks = max((r["issue_weeks"] for r in v["by_horizon"]), default=0)
+        print(f"  {virus}: {checked} forecasts checked, from {weeks} data weeks")
+    for part in record["not_scored"]:
+        if part["country"] is not None:
+            print(f"  ! {part['virus']}/{part['country']}: couldn't be scored, so it's left out", file=sys.stderr)
+    for gap in record["gaps"]:
+        print(f"  ! {gap['country']}/{gap['virus']}: nothing new saved since {gap['newest']}", file=sys.stderr)
+    return 0
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
@@ -374,7 +404,16 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--max-age-hours", type=float, default=6.0, help="re-download cached files older than this")
     b.add_argument("--holdout-weeks", type=int, default=HOLDOUT_WEEKS, help="weeks held out for back-testing")
     b.add_argument("--max-iter", type=int, default=None, help="override boosting rounds per model (lower is faster)")
+    b.add_argument("--archive", default=None,
+                   help="forecast archive folder: save each published forecast there if it changed (the live track record)")
+    b.add_argument("--archive-new", default=None,
+                   help="also copy newly saved archive files here, under the same paths (needs --archive)")
     b.set_defaults(func=cmd_build)
+
+    t = sub.add_parser("score", help="score the forecast archive into the live track record")
+    t.add_argument("--archive", required=True, help="forecast archive folder (written by build --archive)")
+    t.add_argument("--out", default=str(SITE_DIR / "data" / "track-record.json"), help="where to write the track record")
+    t.set_defaults(func=cmd_score)
 
     c = sub.add_parser("compare", help="score the candidate model designs for each virus on held-out years")
     c.add_argument("--countries", help=f"comma-separated subset of: {', '.join(SOURCES)}")
@@ -392,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)
+    if getattr(args, "archive_new", None) and not getattr(args, "archive", None):
+        parser.error("--archive-new needs --archive")
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

@@ -11,6 +11,17 @@ import {
 import { drawChart, fillTable } from "./chart.js";
 import { daysBetween, parseISO, startOfToday, toISO, weekEnding } from "./dates.js";
 import { formatDate, formatDateTime, formatPct, formatSignedPct, formatValue } from "./format.js";
+import { noEstimateText, noForecastWhy, plannerNoForecast, showGeneralAdvice, staleWarning } from "./notes.js";
+import {
+  countryRows,
+  gapsFor,
+  horizonRows,
+  introText,
+  parseTrackRecord,
+  rowCells,
+  statusNotes,
+  unscoredNote,
+} from "./track.js";
 
 const DATA_DIR = "data/";
 const REPO_URL = "https://github.com/thetrueartist/covidWasteWaterVisualisorPredictor";
@@ -421,9 +432,12 @@ function renderVerdict(r, weeks) {
   } else if (now.available) {
     nowLine.textContent = `This week's reading is in: ${own(state.labels, latest.category).toLowerCase()}.`;
   } else {
-    nowLine.textContent = "There's no estimate for this week yet.";
+    nowLine.textContent = noEstimateText(r);
   }
-  $("verdict-advice").textContent = own(GENERAL_ADVICE, nowLevel) ?? "";
+  const age = daysBetween(parseISO(latest.date), state.today);
+  const advice = $("verdict-advice");
+  advice.textContent = showGeneralAdvice(now.available, r, age) ? own(GENERAL_ADVICE, nowLevel) ?? "" : "";
+  advice.hidden = !advice.textContent;
 
   const unit = unitOf(r, meta);
   const pctOfPeak = r.window.max > 0 ? latest.value / r.window.max : null;
@@ -442,10 +456,10 @@ function renderVerdict(r, weeks) {
     ...stats.map(([label, value, noteText]) => h("div", { class: "stat" }, h("dt", {}, label), h("dd", {}, value, h("span", { class: "stat-note" }, noteText)))),
   );
 
-  const age = daysBetween(parseISO(latest.date), state.today);
   const stale = $("stale-warning");
-  stale.hidden = age <= 42;
-  stale.textContent = `The newest data for this area is from ${formatDate(latest.date, true)}, ${Math.round(age / 7)} weeks ago, so treat the forecast with caution.`;
+  const warning = staleWarning(r, latest.date, age);
+  stale.hidden = warning == null;
+  stale.textContent = warning ?? "";
 }
 
 function lagText(fromISO, toISO_) {
@@ -474,7 +488,7 @@ function probBar(probs) {
 function renderWeeks(r) {
   const list = $("weeks");
   if (!r.forecast.length) {
-    setChildren(list, h("li", { class: "week" }, "No forecast for this area: it doesn't have enough recent history."));
+    setChildren(list, h("li", { class: "week" }, `No forecast for this area: ${noForecastWhy(r)}.`));
     return;
   }
   const thisWeek = toISO(weekEnding(state.today));
@@ -720,7 +734,7 @@ async function renderPlanner() {
     const scope = u.exact ? "" : ` (${u.region.name}-wide: no local data)`;
     const lab = u.meta.signal.kind === "lab tests" ? " Based on lab tests." : "";
     if (!r) {
-      return h("li", { class: "verdict-row" }, h("span", { class: "status-icon status-none" }), h("div", {}, h("strong", {}, own(state.virusLabels, v)), h("span", { class: "verdict-detail" }, `No forecast reaches that week yet${scope}.`)));
+      return h("li", { class: "verdict-row" }, h("span", { class: "status-icon status-none" }), h("div", {}, h("strong", {}, own(state.virusLabels, v)), h("span", { class: "verdict-detail" }, plannerNoForecast(u.region, scope))));
     }
     const detail =
       r.week.source === "measured"
@@ -913,7 +927,7 @@ function renderAbout() {
   const leansHigh = Number.isFinite(last?.bias_log) && last.bias_log > Math.log(1.15);
   $("metrics-note").textContent = [
     `Forecasts re-made for ${model.n_series} ${inText(state.virus)} series over the year from ${formatDate(model.holdout_start, true)}, using today's data.`,
-    `The model never trained on those weeks, but its ranges and fallbacks were tuned on them, so this is a best case, not a record of what the site said at the time. The live track record below is.`,
+    `The model never trained on those weeks, but its ranges, the switch to no change and which inputs it uses were tuned on them, so read this as a best case, not as a record of what the site said at the time. That record is the live track record below.`,
     `Brackets show the result of simply assuming no change.`,
     Number.isFinite(quiet) ? `"Quiet weeks" started at very low, where any method does well; they were ${pct(quiet)} of the forecasts.` : "",
     `"Vs no change" compares the whole forecast range with assuming no change but with the same uncertainty.`,
@@ -924,6 +938,8 @@ function renderAbout() {
   ]
     .filter(Boolean)
     .join(" ");
+
+  renderTrackRecord();
 
   const signal = currentMeta().signal;
   setChildren(
@@ -939,6 +955,87 @@ function renderAbout() {
     h("a", { href: REPO_URL, target: "_blank", rel: "noopener noreferrer" }, "Source code"),
     ". Not medical advice.",
   );
+}
+
+// ---------- live track record ----------
+const LIVE_COLUMNS = ["Weeks after the data", "Weeks checked", "Right level", "No change", "Difference", "In 90% range"];
+let trackRecord = null; // pending fetch of data/track-record.json, parsed (null if missing or invalid)
+
+function loadTrackRecord() {
+  trackRecord ??= getJSON("track-record.json").then(parseTrackRecord, () => null);
+  return trackRecord;
+}
+
+/** Forecasts saved before their outcome was known, checked once the data came in. */
+function renderTrackRecord() {
+  const virus = state.virus;
+  const countryId = state.countryId;
+  loadTrackRecord()
+    .then((record) => {
+      if (virus === state.virus && countryId === state.countryId) drawTrackRecord(record);
+    })
+    .catch(() => drawTrackRecord(null));
+}
+
+function liveTable(table, rows) {
+  setChildren(
+    table,
+    h("thead", {}, h("tr", {}, LIVE_COLUMNS.map((c, i) => h("th", { scope: "col", class: i ? "num" : null }, c)))),
+    h("tbody", {}, rows.map((r) => h("tr", {}, rowCells(r).map((cell, i) => h("td", { class: i ? "num" : null }, cell))))),
+  );
+}
+
+function archiveLink() {
+  return h(
+    "p",
+    {},
+    "Every saved forecast is public on the ",
+    h("a", { href: `${REPO_URL}/tree/forecast-archive`, target: "_blank", rel: "noopener noreferrer" }, "forecast-archive branch"),
+    ".",
+  );
+}
+
+function drawTrackRecord(record) {
+  const label = own(state.virusLabels, state.virus) ?? "";
+  $("live-heading").textContent = `${label}: live track record`;
+  $("live-intro").textContent = introText(record, state.virus, inText(state.virus));
+  const table = $("live-table");
+  const v = record?.state === "ok" ? own(record.viruses, state.virus) : undefined;
+  if (!v || !v.issues || v.unavailable) {
+    table.hidden = true;
+    // Recording, but not shown this time: the saved forecasts are still there to see.
+    setChildren($("live-notes"), record?.state === "unavailable" || v?.unavailable ? archiveLink() : null);
+    $("live-country").hidden = true;
+    return;
+  }
+  const rows = horizonRows(record, state.virus);
+  liveTable(table, rows);
+  table.hidden = false;
+
+  const notes = [
+    ...statusNotes(rows, record.since, state.today),
+    "As in the back-test, weeks are counted from the newest week of data, which is usually one to two weeks old when a forecast is published.",
+  ];
+  const unscored = unscoredNote(record, state.virus);
+  if (unscored) notes.push(unscored);
+  const gaps = gapsFor(record, state.virus);
+  if (gaps.length) {
+    const where = gaps.map((g) => `${countryMeta(g.country)?.name ?? g.name} (since ${formatDate(g.newest, true)})`);
+    notes.push(`No new ${inText(state.virus)} forecasts have been saved lately for ${where.join(", ")}.`);
+  }
+  setChildren(
+    $("live-notes"),
+    notes.map((n) => h("p", {}, n)),
+    archiveLink(),
+  );
+
+  const here = countryRows(record, state.virus, state.countryId);
+  const box = $("live-country");
+  if (here.length) {
+    $("live-country-heading").textContent = `In ${countryMeta(state.countryId)?.name ?? ""}`;
+    liveTable($("live-country-table"), here);
+  }
+  box.hidden = !here.length;
 }
 
 // ---------- events ----------

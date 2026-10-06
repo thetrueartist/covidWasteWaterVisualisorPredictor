@@ -4,6 +4,15 @@ name: Build data and deploy site
 # static site to GitHub Pages. Enable it once under
 # Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
 # Until then the check job skips the rest instead of failing.
+#
+# The forecasts published are also saved to the forecast-archive branch, so they
+# can be checked once the real data arrives. Who can do what:
+#   build    runs third-party packages with a read-only token; reads the
+#            archive and hands over any new forecast files
+#   deploy   publishes the site (pages + id-token)
+#   archive  the only job that can write; runs no project code or packages,
+#            checks the files with .github/scripts/check-new-forecasts.sh and
+#            adds them to forecast-archive with plain git
 
 on:
   schedule:
@@ -56,10 +65,43 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    outputs:
+      archived: ${{ steps.new.outputs.archived }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The forecasts the site has published are kept on the forecast-archive
+      # branch. This job only reads it (a copy without git history, fetched
+      # before any package is installed) and hands new files to the archive
+      # job below. If the branch can't be fetched, today's forecasts are
+      # neither saved nor scored, rather than saved as if nothing came before.
+      - name: Get the forecast archive
+        id: archive
+        env:
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+        run: |
+          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+          auth="AUTHORIZATION: basic $basic"
+          url="https://github.com/$REPO"
+          status=0
+          # The full ref: ls-remote matches names by their ending, so a plain
+          # "forecast-archive" would also match a branch like fix/forecast-archive.
+          git -c http.extraheader="$auth" ls-remote --exit-code "$url" refs/heads/forecast-archive >/dev/null || status=$?
+          if [ "$status" -eq 0 ] && git -c http.extraheader="$auth" clone --quiet --depth 1 --branch forecast-archive "$url" archive; then
+            rm -rf archive/.git
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 2 ]; then
+            echo "No forecast-archive branch yet: this run starts it."
+            mkdir archive
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            rm -rf archive
+            echo "::warning title=Forecast archive unavailable::Couldn't fetch the forecast-archive branch, so today's forecasts won't be saved or scored."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -71,14 +113,151 @@ jobs:
           path: .cache
           key: downloads-${{ github.run_id }}
           restore-keys: downloads-
-      - run: python -m wastewater -v build
+      # Writes the site's data and, when the archive was fetched, saves each
+      # country and virus's forecasts as a new file if they changed (archive-new/
+      # gets a copy of just the new files).
+      - name: Build the data
+        env:
+          ARCHIVE_OK: ${{ steps.archive.outputs.ok }}
+        run: |
+          if [ "$ARCHIVE_OK" = true ]; then
+            python -m wastewater -v build --archive archive --archive-new archive-new
+          else
+            python -m wastewater -v build
+          fi
+      # The live track record. A failure here leaves the site without it but
+      # never stops the deploy.
+      - name: Score the forecast archive
+        id: score
+        if: steps.archive.outputs.ok == 'true'
+        continue-on-error: true
+        timeout-minutes: 15
+        run: python -m wastewater score --archive archive --out site/data/track-record.json
+      # If the archive couldn't be fetched (the build then wrote "not recording")
+      # or couldn't be scored (no file at all), the site says the track record
+      # couldn't be updated, which is true, rather than that it isn't recording.
+      # (outcome, not conclusion: continue-on-error turns a failure's conclusion
+      # into success. A skipped score step means the fetch failed.)
+      - name: Note that the track record couldn't be updated
+        if: steps.score.outcome != 'success'
+        env:
+          ARCHIVE_OK: ${{ steps.archive.outputs.ok }}
+        run: |
+          if [ "$ARCHIVE_OK" = true ]; then reason=score; else reason=fetch; fi
+          printf '{"schema":1,"recording":true,"available":false,"reason":"%s","generated_at":"%s"}\n' \
+            "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > site/data/track-record.json
+      - name: Collect new forecast files
+        id: new
+        run: |
+          if [ -d archive-new ] && [ -n "$(find archive-new -type f -print -quit)" ]; then
+            echo "archived=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "archived=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.new.outputs.archived == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: forecast-archive-new
+          path: archive-new
+          retention-days: 7
+          if-no-files-found: error
       # Keep each published copy of the site for 90 days (the default is 1), so
-      # what the site said on any day stays on record until the forecast
-      # archive takes over.
+      # what the site said on any day stays on record.
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
           retention-days: 90
+
+  archive:
+    name: Save today's forecasts
+    # After the deploy, so only forecasts that were really published are saved.
+    needs: [build, deploy]
+    if: needs.build.outputs.archived == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This job runs no project code and installs nothing. It checks the build's
+    # files with a script from this commit and adds them to the forecast-archive
+    # branch with plain git; it only ever adds files. Rulesets (docs/hosting.md)
+    # stop that branch's history being rewritten or the branch deleted (any later
+    # change to a saved file would show as a new commit) and keep this token off main.
+    permissions:
+      contents: write # to add files to the forecast-archive branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: code
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: forecast-archive-new
+          path: new
+      - name: Check and save the new forecasts
+        env:
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+          auth="AUTHORIZATION: basic $basic"
+          url="https://github.com/$REPO"
+          export GIT_TERMINAL_PROMPT=0
+          for attempt in 1 2 3 4; do # one try and three retries
+            # A fresh copy of the branch each time, so a retry re-applies the
+            # files on top of whatever was pushed meanwhile (they're all new paths).
+            rm -rf branch
+            status=0
+            git -c http.extraheader="$auth" ls-remote --exit-code "$url" refs/heads/forecast-archive >/dev/null || status=$?
+            if [ "$status" -eq 0 ]; then
+              if ! git -c http.extraheader="$auth" clone --quiet --depth 1 --branch forecast-archive "$url" branch; then
+                echo "Couldn't fetch forecast-archive (attempt $attempt)."
+                sleep $((attempt * 10))
+                continue
+              fi
+            elif [ "$status" -eq 2 ]; then
+              # First run: start the branch with its README.
+              git init --quiet branch
+              git -C branch checkout --quiet --orphan forecast-archive
+              cp code/.github/scripts/forecast-archive-README.md branch/README.md
+              git -C branch add README.md
+            else
+              echo "Couldn't reach the repository (git exit $status, attempt $attempt)."
+              sleep $((attempt * 10))
+              continue
+            fi
+            # An earlier attempt may have been saved even though git reported an error.
+            if [ "$attempt" -gt 1 ] && [ -s accepted.txt ]; then
+              saved=true
+              while IFS= read -r f; do cmp -s "new/$f" "branch/$f" || saved=false; done < accepted.txt
+              if [ "$saved" = true ]; then echo "Already saved."; exit 0; fi
+            fi
+            # The checks don't need the token, and their gzip and jq read files that
+            # aren't trusted, so it's kept out of their environment. (Not a hard
+            # boundary: they still run in this job, as the same user.)
+            env -u TOKEN bash code/.github/scripts/check-new-forecasts.sh new branch > accepted.txt
+            while IFS= read -r f; do
+              mkdir -p "branch/$(dirname "$f")"
+              cp -- "new/$f" "branch/$f"
+              git -C branch add -- "$f"
+            done < accepted.txt
+            if git -C branch diff --cached --quiet; then
+              echo "Nothing new to save."
+              exit 0
+            fi
+            git -C branch -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet -m "Save $(wc -l < accepted.txt) forecast file(s) published $(date -u +%F)" -m "Run: $RUN_URL"
+            if git -C branch -c http.extraheader="$auth" push --quiet "$url" HEAD:refs/heads/forecast-archive; then
+              echo "Saved $(wc -l < accepted.txt) new forecast file(s)."
+              exit 0
+            fi
+            echo "The push was refused (attempt $attempt)."
+            if [ "$attempt" -lt 4 ]; then sleep $((attempt * 10)); fi
+          done
+          echo "::error title=Forecasts not saved::Couldn't save today's forecasts to forecast-archive after 4 attempts."
+          exit 1
 
   deploy:
     name: Deploy
