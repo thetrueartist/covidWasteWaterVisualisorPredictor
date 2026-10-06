@@ -871,9 +871,15 @@ function renderAbout() {
 
   const label = own(state.virusLabels, state.virus);
   const model = idx.models[state.virus];
-  $("metrics-heading").textContent = `${label} model: back-test on the last year`;
+  $("metrics-heading").textContent = `${label} model: re-run on the past year`;
   const t = $("metrics-table");
-  const head = h("thead", {}, h("tr", {}, ["Weeks ahead", "Typical miss", "No-change miss", "Better by", "Right level"].map((c, i) => h("th", { scope: "col", class: i ? "num" : null }, c))));
+  const pct = (x) => (Number.isFinite(x) ? `${Math.round(100 * x)}%` : "–");
+  const pair = (a, b) => (Number.isFinite(a) ? `${pct(a)} (${pct(b)})` : "–");
+  const head = h(
+    "thead",
+    {},
+    h("tr", {}, ["Weeks after the data", "Right level", "Leaving out quiet weeks", "Vs no change"].map((c, i) => h("th", { scope: "col", class: i ? "num" : null }, c))),
+  );
   const body = h(
     "tbody",
     {},
@@ -882,10 +888,9 @@ function renderAbout() {
         "tr",
         {},
         h("td", {}, String(m.horizon_weeks)),
-        h("td", { class: "num" }, `±${Math.round(m.typical_error_pct)}%`),
-        h("td", { class: "num" }, `±${Math.round(m.typical_error_pct_no_change)}%`),
-        h("td", { class: "num" }, formatSignedPct(100 * m.skill_vs_no_change_final)),
-        h("td", { class: "num" }, `${Math.round(100 * m.category_accuracy)}%`),
+        h("td", { class: "num" }, pair(m.category_accuracy, m.category_accuracy_no_change)),
+        h("td", { class: "num" }, pair(m.category_accuracy_not_very_low, m.category_accuracy_not_very_low_no_change)),
+        h("td", { class: "num" }, Number.isFinite(m.relative_wis) ? formatSignedPct(100 * (1 - m.relative_wis)) : formatSignedPct(100 * m.skill_vs_no_change_final)),
       ),
     ),
   );
@@ -898,16 +903,27 @@ function renderAbout() {
   let countryNote = "";
   if (countryRows.length) {
     if (!skills.length) {
-      countryNote = `For ${country.name} the ${inText(state.virus)} model didn't beat no-change in testing, so its forecasts assume levels stay where they are, with the model's uncertainty range.`;
-    } else {
-      const lo = Math.round(100 * Math.min(...skills));
-      const hi = Math.round(100 * Math.max(...skills));
-      countryNote = `For ${country.name} the ${inText(state.virus)} model was ${lo === hi ? `${lo}%` : `${lo}–${hi}%`} more accurate than no-change${fallback.length ? `, and uses no-change ${fallback.length === 1 ? `for ${fallback[0]}` : `for ${fallback[0]}–${fallback[fallback.length - 1]}`} weeks ahead, where it wasn't` : ""}.`;
+      countryNote = `For ${country.name} the ${inText(state.virus)} model didn't beat no change in testing, so its forecasts assume levels stay where they are, with the model's uncertainty range.`;
+    } else if (fallback.length) {
+      countryNote = `For ${country.name} it uses no change ${fallback.length === 1 ? `${fallback[0]} weeks after the data` : `${fallback[0]}–${fallback[fallback.length - 1]} weeks after the data`}, where the model didn't beat it.`;
     }
   }
-  const baseline = model.by_horizon.map((m) => Math.round(100 * m.category_accuracy_no_change));
-  $("metrics-note").textContent =
-    `Tested on ${model.n_series} ${inText(state.virus)} series, on weeks from ${formatDate(model.holdout_start, true)} onward that the model never saw. "Typical miss" is how far the forecast usually lands from the real level. "Right level" counts forecasts that landed in the correct band; assuming no change managed ${Math.min(...baseline)}–${Math.max(...baseline)}%. ${countryNote}`;
+  const quiet = model.by_horizon.find((m) => Number.isFinite(m.share_starting_very_low))?.share_starting_very_low;
+  const last = model.by_horizon[model.by_horizon.length - 1];
+  const leansHigh = Number.isFinite(last?.bias_log) && last.bias_log > Math.log(1.15);
+  $("metrics-note").textContent = [
+    `Forecasts re-made for ${model.n_series} ${inText(state.virus)} series over the year from ${formatDate(model.holdout_start, true)}, using today's data.`,
+    `The model never trained on those weeks, but its ranges and fallbacks were tuned on them, so this is a best case, not a record of what the site said at the time. The live track record below is.`,
+    `Brackets show the result of simply assuming no change.`,
+    Number.isFinite(quiet) ? `"Quiet weeks" started at very low, where any method does well; they were ${pct(quiet)} of the forecasts.` : "",
+    `"Vs no change" compares the whole forecast range with assuming no change but with the same uncertainty.`,
+    `The planner's "This week" is usually 2–3 weeks after the latest data.`,
+    `Forecasts are least reliable around peaks and at the start of new waves.`,
+    leansHigh ? `Further ahead, this forecast has tended to run high: after a peak, levels have usually fallen faster than it shows.` : "",
+    countryNote,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const signal = currentMeta().signal;
   setChildren(

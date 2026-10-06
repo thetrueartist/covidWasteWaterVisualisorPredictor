@@ -143,3 +143,20 @@ def test_calibration_scales_spread_around_median():
     # widening the 50% range past the 90% range must not leave crossed quantiles
     crossed = apply_calibration(pred, {h: (3.0, 0.5) for h in HORIZONS})
     assert (np.diff(crossed, axis=2) >= 0).all()
+
+
+def test_weighted_interval_score_matches_hand_worked_values():
+    from wastewater.model import _wis
+
+    q = np.array([[-2.0, -1.0, 0.0, 1.0, 2.0]] * 2)
+    # inside both ranges: 0.5*0 + 0.25*2 + 0.05*4 = 0.7, divided by 2.5
+    # above both: 0.5*3 + 0.25*(2 + 4*2) + 0.05*(4 + 20*1) = 5.2, divided by 2.5
+    np.testing.assert_allclose(_wis(q, np.array([0.0, 3.0])), [0.28, 2.08])
+
+
+def test_back_test_reports_fairer_comparisons(dataset):
+    metrics, _ = evaluate(dataset, "covid", replace(FAST, max_iter=30), holdout_weeks=40)
+    for m in metrics["by_horizon"]:
+        assert 0 <= m["share_starting_very_low"] <= 1
+        assert m["relative_wis"] is None or m["relative_wis"] > 0
+        assert np.isfinite(m["bias_log"])

@@ -240,7 +240,7 @@ export function drawChart(container, region, opts) {
 
   // ---- hover / keyboard readout ----
   const points = [
-    ...vis.filter((p) => p.smooth != null || p.raw != null).map((p) => ({ kind: "obs", date: p.date, p })),
+    ...vis.filter((p) => p.smooth != null || p.raw != null).map((p) => ({ kind: "obs", date: p.date, p, latest: p === anchor })),
     ...fc.map((f) => ({ kind: "fc", date: f.date, f: f.f })),
   ];
   const cross = svg("line", { y1: 0, y2: ph, stroke: "var(--ink-2)", "stroke-width": 1, visibility: "hidden" }, g);
@@ -311,17 +311,24 @@ function row(parent, keyClass, label, value) {
   parent.appendChild(r);
 }
 
+/** A weekly reading as text. Zero means below the lab's detection limit, not "no virus". */
+function measured(raw, unit = "") {
+  if (raw == null) return "no sample";
+  if (raw === 0) return "below detection";
+  return `${formatValue(raw)}${unit}`;
+}
+
 function fillTooltip(tip, pt, opts) {
   tip.replaceChildren();
   const unit = opts.unit ? ` ${opts.unit}` : "";
   const head = document.createElement("div");
   head.className = "tt-date";
-  head.textContent = `Week ending ${formatDate(pt.date, true)}${pt.kind === "fc" ? " · forecast" : ""}`;
+  head.textContent = `Week ending ${formatDate(pt.date, true)}${pt.kind === "fc" ? " · forecast" : pt.latest ? " · provisional" : ""}`;
   tip.appendChild(head);
   if (pt.kind === "obs") {
     const p = pt.p;
     row(tip, "tt-key", "Trend", `${formatValue(p.smooth)}${unit}`);
-    row(tip, "tt-key-dot", "Measured", p.raw == null ? "no sample" : `${formatValue(p.raw)}${unit}`);
+    row(tip, "tt-key-dot", "Measured", measured(p.raw, unit));
     if (p.index != null) {
       const id = LEVEL_IDS[Math.min(4, Math.floor(p.index / 20))];
       row(tip, null, "Level", `${opts.labels[id]} (${p.index}/100)`);
@@ -387,11 +394,12 @@ export function fillTable(table, region, opts) {
   for (let i = region.smooth.length - 1, n = 0; i >= 0 && n < 26; i--) {
     if (region.smooth[i] == null && region.raw[i] == null) continue;
     n++;
+    const provisional = n === 1 ? " (provisional)" : "";
     const idx = region.index[i];
     const id = idx == null ? null : LEVEL_IDS[Math.min(4, Math.floor(idx / 20))];
     add([
-      [formatDate(addDays(start, 7 * i), true)],
-      [formatValue(region.raw[i]), true],
+      [`${formatDate(addDays(start, 7 * i), true)}${provisional}`],
+      [measured(region.raw[i]), true],
       [formatValue(region.smooth[i]), true],
       [id ? `${opts.labels[id]} (${idx}/100)` : "–"],
     ]);

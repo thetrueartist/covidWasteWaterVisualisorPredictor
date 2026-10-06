@@ -150,7 +150,13 @@ years but didn't help flu or RSV.
 **Keeping it honest.** The most recent year is held out and each model is scored against simply
 assuming "no change". Where a model doesn't win for a country and horizon, its forecasts fall back to
 no-change. The same hold-out calibrates the ranges so the 50% and 90% bands cover about 50% and 90% of
-outcomes. Back-test results from the 2 Oct 2026 build (the site shows the latest ones):
+outcomes. Because the ranges and fallbacks were tuned on that same year, and the forecasts are re-made
+from today's (revised) data, these back-test numbers are a best case rather than a record of what the
+site said at the time. The site also shows fairer comparisons: accuracy leaving out weeks that start at
+"very low" (over half of COVID's, where any method does well), and the whole forecast range scored
+against "no change" with the same uncertainty. Forecasts are least reliable around peaks and at the start
+of new waves, and COVID's longer-range forecasts have tended to run high after a peak.
+Back-test results from the 2 Oct 2026 build (the site shows the latest ones):
 
 | Weeks ahead | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|

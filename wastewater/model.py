@@ -313,6 +313,25 @@ def _fit_scale(pred_h: np.ndarray, actual: np.ndarray, lo: int, hi: int, nominal
     return float(grid[-1])
 
 
+def _calibrated(pred_h: np.ndarray, k50: float, k90: float) -> np.ndarray:
+    """One horizon's quantiles with the published range widths applied."""
+    med = pred_h[:, MID : MID + 1]
+    k = np.array([k90 if q in (0.05, 0.95) else k50 if q in (0.25, 0.75) else 1.0 for q in QUANTILES])
+    return np.sort(med + k * (pred_h - med), axis=1)
+
+
+def _wis(q: np.ndarray, actual: np.ndarray) -> np.ndarray:
+    """Weighted interval score per row, from the 5 quantiles (50% and 90% ranges plus median)."""
+    total = 0.5 * np.abs(actual - q[:, MID])
+    for lo, hi, alpha in ((QUANTILES.index(0.25), QUANTILES.index(0.75), 0.5), (QUANTILES.index(0.05), QUANTILES.index(0.95), 0.1)):
+        low, high = q[:, lo], q[:, hi]
+        width = high - low
+        below = (2 / alpha) * np.clip(low - actual, 0, None)
+        above = (2 / alpha) * np.clip(actual - high, 0, None)
+        total = total + (alpha / 2) * (width + below + above)
+    return total / 2.5  # K + 1/2 with K = 2 ranges
+
+
 def _categories(levels: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return (levels[:, None] >= edges).sum(axis=1)
 
@@ -385,6 +404,14 @@ def evaluate(
         cat_pred = _categories(ys + pred[:, MID], edges)
         cat_none = _categories(ys, edges)
         areas = (test["level_name"] != "site").to_numpy()
+        # Fairer comparisons than the plain right-level rate:
+        # - leave out weeks that start at "very low", where any method scores well;
+        # - compare against "no change" carrying the same uncertainty as the
+        #   forecast (median at today's level), using the weighted interval score.
+        busy = cat_none > 0
+        published = _calibrated(pred, k50, k90)
+        no_change = published - published[:, MID : MID + 1]
+        wis, wis_none = _wis(published, actual), _wis(no_change, actual)
         by_horizon.append(
             {
                 "horizon_weeks": h,
@@ -397,6 +424,11 @@ def evaluate(
                 "category_accuracy": round(float(np.mean(cat_true == cat_pred)), 3),
                 "category_accuracy_no_change": round(float(np.mean(cat_true == cat_none)), 3),
                 "within_one_category": round(float(np.mean(np.abs(cat_true - cat_pred) <= 1)), 3),
+                "share_starting_very_low": round(float(np.mean(~busy)), 3),
+                "category_accuracy_not_very_low": round(float(np.mean((cat_true == cat_pred)[busy])), 3) if busy.any() else None,
+                "category_accuracy_not_very_low_no_change": round(float(np.mean((cat_true == cat_none)[busy])), 3) if busy.any() else None,
+                "relative_wis": round(float(wis.mean() / wis_none.mean()), 3) if wis_none.mean() > 0 else None,
+                "bias_log": round(float(np.mean(pred[:, MID] - actual)), 3),
                 "coverage_50_raw": round(_coverage(pred, actual, lo50, hi50), 3),
                 "coverage_90_raw": round(_coverage(pred, actual, lo90, hi90), 3),
                 "calibration_50": k50,
